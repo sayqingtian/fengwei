@@ -11,18 +11,24 @@ function worker(cached, fetch) {
     caches: { match: async () => cached }, fetch, URL, Response,
   };
   vm.runInNewContext(source, context);
-  return request => new Promise(resolve => handlers.fetch({ request, respondWith: response => resolve(response) }));
+  return request => { let response; handlers.fetch({ request, respondWith: value => { response = Promise.resolve(value); } }); return response; };
 }
 const navigation = { url: 'https://example.test/recipes/', method: 'GET', mode: 'navigate' };
 
 test('installed app opens from its cache without waiting for an unreachable host', async () => {
-  const cached = new Response('<title>拾味</title>');
+  const cached = new Response('<title>峰味</title>');
   let serverRequests = 0;
   const request = worker(cached, () => { serverRequests++; return new Promise(() => {}); });
   let timeout;
   const response = await Promise.race([request(navigation), new Promise((_, reject) => { timeout = setTimeout(() => reject(new Error('Cached startup waited for the host')), 500); })]).finally(() => clearTimeout(timeout));
-  assert.equal(await response.text(), '<title>拾味</title>');
+  assert.equal(await response.text(), '<title>峰味</title>');
   assert.equal(serverRequests, 0);
+});
+
+test('private server API requests bypass the offline cache, including direct navigation', () => {
+  const request = worker(new Response('cached interface'), async () => new Response('network'));
+  assert.equal(request({ url: 'https://example.test/recipes/api/recipes', method: 'GET', mode: 'navigate' }), undefined);
+  assert.equal(request({ url: 'https://example.test/recipes/api/photo/abc', method: 'GET', mode: 'cors' }), undefined);
 });
 
 test('an uncached navigation still retrieves the initial application from the host', async () => {

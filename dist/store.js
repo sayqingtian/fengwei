@@ -1,8 +1,18 @@
+import { createRemoteStore } from './sync.js';
 export const CATEGORIES = ['家常菜', '下饭菜', '汤羹', '早餐', '烘焙', '甜点', '饮品', '其他'];
-export const BACKUP_FORMAT = 'shiwei-recipes';
+export const BACKUP_FORMAT = 'fengwei-recipes';
 export const BACKUP_VERSION = 1;
 const MAX_TEXT = 12000;
-export const createId = () => globalThis.crypto?.randomUUID?.() || `recipe-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+export const createId = () => {
+  if (globalThis.crypto?.randomUUID) return crypto.randomUUID();
+  if (globalThis.crypto?.getRandomValues) {
+    const bytes = crypto.getRandomValues(new Uint8Array(16));
+    bytes[6] = (bytes[6] & 15) | 64; bytes[8] = (bytes[8] & 63) | 128;
+    const hex = [...bytes].map(byte => byte.toString(16).padStart(2, '0')).join('');
+    return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
+  }
+  return `recipe-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+};
 export const isPhoto = value => typeof value === 'string' && /^data:image\/(jpeg|png|webp);base64,[A-Za-z0-9+/=\r\n]+$/.test(value) && value.length <= 8000000;
 
 function string(value, label, max = MAX_TEXT) {
@@ -43,8 +53,8 @@ export function validateRecipe(raw) {
 
 export function parseBackup(text) {
   let data;
-  try { data = JSON.parse(text); } catch { throw new Error('文件无法读取，请选择拾味导出的 JSON 备份'); }
-  if (data?.format !== BACKUP_FORMAT || data?.version !== BACKUP_VERSION || !Array.isArray(data.recipes)) throw new Error('这不是受支持的拾味备份文件');
+  try { data = JSON.parse(text); } catch { throw new Error('文件无法读取，请选择峰味或旧版拾味导出的 JSON 备份'); }
+  if (![BACKUP_FORMAT, 'shiwei-recipes'].includes(data?.format) || data?.version !== BACKUP_VERSION || !Array.isArray(data.recipes)) throw new Error('这不是受支持的峰味备份文件');
   if (data.recipes.length > 10000) throw new Error('单次最多导入 10000 道菜谱');
   const recipes = data.recipes.map(validateRecipe);
   if (new Set(recipes.map(item => item.id)).size !== recipes.length) throw new Error('备份中包含重复编号，请检查文件');
@@ -76,7 +86,7 @@ export function filterRecipes(recipes, { query = '', category = '全部', favori
   }).sort((a, b) => sort === 'name' ? a.title.localeCompare(b.title, 'zh-CN') : Date.parse(b.updatedAt) - Date.parse(a.updatedAt));
 }
 
-export async function openStore() {
+export async function openLocalStore() {
   const db = await new Promise((resolve, reject) => {
     if (!globalThis.indexedDB) { reject(new Error('当前浏览器无法保存菜谱，请使用 Safari 普通浏览模式')); return; }
     const request = indexedDB.open('shiwei-private-recipes', 1);
@@ -87,7 +97,7 @@ export async function openStore() {
     };
     request.onsuccess = () => resolve(request.result);
     request.onerror = () => reject(request.error);
-    request.onblocked = () => reject(new Error('请关闭其他拾味页面后重试'));
+    request.onblocked = () => reject(new Error('请关闭其他菜谱页面后重试'));
   });
   db.onversionchange = () => db.close();
   function operation(storeName, mode, execute) {
@@ -109,4 +119,12 @@ export async function openStore() {
     setting: key => operation('settings', 'readonly', (store, set) => { const req = store.get(key); req.onsuccess = () => set(req.result); }),
     setSetting: (key, value) => operation('settings', 'readwrite', store => store.put(value, key))
   };
+}
+
+export async function openStore() {
+  // Keep the old database intact for explicit migration. It is now a cache,
+  // never a silent fallback write destination when the server is unavailable.
+  let local = null;
+  try { local = await openLocalStore(); } catch { /* Server access can work without a browser cache. */ }
+  return createRemoteStore(local);
 }

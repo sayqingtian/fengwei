@@ -7,6 +7,11 @@ test('backup round trip retains photos, ingredient amounts, notes and favorites'
   const original = recipe({ photo: 'data:image/png;base64,aGVsbG8=', favorite: true, notes: '手写心得\n下次少放盐' });
   assert.deepEqual(parseBackup(makeBackup([original])), [original]);
 });
+test('legacy Shiwei backups still import after the product rename', () => {
+  const old = JSON.stringify({ format: 'shiwei-recipes', version: 1, recipes: [recipe()] });
+  assert.deepEqual(parseBackup(old), [recipe()]);
+  assert.equal(JSON.parse(makeBackup([recipe()])).format, 'fengwei-recipes');
+});
 test('invalid or unsupported backups are rejected as a whole', () => {
   for (const data of ['not json', '{"format":"shiwei-recipes","version":2,"recipes":[]}', '{"format":"shiwei-recipes","version":1,"recipes":[{}]}']) assert.throws(() => parseBackup(data));
   assert.throws(() => parseBackup(JSON.stringify({ format: 'shiwei-recipes', version: 1, recipes: [recipe(), recipe()] })), /重复编号/);
