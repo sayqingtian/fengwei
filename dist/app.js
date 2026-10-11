@@ -358,6 +358,13 @@ async function init() {
   }
   if ('serviceWorker' in navigator && window.isSecureContext) {
     try {
+      // An already installed app is ready offline even if an update check
+      // cannot reach the host on the device's current network.
+      const existing = await navigator.serviceWorker.getRegistration('./');
+      if (existing?.active) {
+        offlineReady = true;
+        if (page === 'backup') render();
+      }
       await navigator.serviceWorker.register('./sw.js', { scope: './' });
       await navigator.serviceWorker.ready;
       offlineReady = true;

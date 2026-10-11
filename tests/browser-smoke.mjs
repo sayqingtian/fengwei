@@ -115,11 +115,20 @@ try {
   await page.screenshot({ path: resolve(output, 'mobile-recipes.png'), fullPage: true });
 
   await context.setOffline(false);
+  const startupFetches = [];
+  const observeStartup = request => {
+    if (request.serviceWorker() && new URL(request.url()).pathname === '/') startupFetches.push(request.url());
+  };
+  context.on('request', observeStartup);
+  await page.reload({ timeout: 5000 });
+  await page.getByRole('button', { name: '查看 离线记录的清汤面' }).waitFor();
+  context.off('request', observeStartup);
+  assert.deepEqual(startupFetches, [], 'installed app startup must not fetch its page from the host');
   await page.setViewportSize({ width: 1280, height: 950 });
   await page.screenshot({ path: resolve(output, 'desktop-recipes.png'), fullPage: true });
   assert.equal(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth), true, 'desktop layout must fit viewport');
   assert.deepEqual(errors, [], 'no browser runtime errors');
   assert.deepEqual(externalRequests, [], 'the application does not upload recipes or load remote resources');
-  await writeFile(resolve(output, 'verification.json'), JSON.stringify({ passed: true, viewport: '390x844 and 1280x950', checks: ['create', 'photo compression', 'edit', 'favorite', 'ingredient and notes search', 'cook steps', 'reload persistence', 'unsaved-change protection', 'delete confirmation', 'backup with photos', 'invalid backup rejection', 'restore backup', 'offline reload', 'offline create and persistence', 'no external app requests', 'no runtime errors'] }, null, 2));
+  await writeFile(resolve(output, 'verification.json'), JSON.stringify({ passed: true, viewport: '390x844 and 1280x950', checks: ['create', 'photo compression', 'edit', 'favorite', 'ingredient and notes search', 'cook steps', 'reload persistence', 'unsaved-change protection', 'delete confirmation', 'backup with photos', 'invalid backup rejection', 'restore backup', 'offline reload', 'offline create and persistence', 'cached startup without a host fetch', 'no external app requests', 'no runtime errors'] }, null, 2));
   console.log('Browser smoke checks passed. Screenshots and verification are in artifacts/.');
 } finally { await browser.close(); }
