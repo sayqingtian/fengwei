@@ -1,0 +1,6 @@
+node_modules/
+.cache/
+artifacts/
+*.tar.gz
+*.log
+.openai/*.local.*
