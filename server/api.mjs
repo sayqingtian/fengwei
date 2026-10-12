@@ -47,7 +47,7 @@ export function createApi({ database, password }) {
         try { await requireUniqueWrites(database.store); }
         catch (error) {
           console.error('Fengwei registration storage unavailable:', error.code || error.name);
-          const code = /^(UNIQUE_STORAGE_UNAVAILABLE|ATOMIC_STORAGE_(UNAVAILABLE|CONNECTION_FAILED|HTTP_\d{3}))$/.test(error.code || '') ? error.code : 'STORAGE_UNAVAILABLE';
+          const code = /^(UNIQUE_STORAGE_UNAVAILABLE|ACCOUNT_DATABASE_(NOT_CONFIGURED|INVALID_CONFIG|CONNECTION_FAILED|AUTH_FAILED|SCHEMA_REQUIRED|UNAVAILABLE|CHANGED|UNSUPPORTED_KEY))$/.test(error.code || '') ? error.code : 'STORAGE_UNAVAILABLE';
           return reply({ ok: false, registration: false, code }, 503);
         }
         return reply({ ok: true, registration: true });

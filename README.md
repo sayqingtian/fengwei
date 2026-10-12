@@ -10,6 +10,14 @@
 
 GitHub 关联项目与原直接上传项目是不同项目，Blob 数据不会自动迁移。迁移菜谱时，在旧网站导出 JSON 备份后，在新网站使用管理员账号导入。详情见 [DEPLOY-EDGEONE.md](DEPLOY-EDGEONE.md)。
 
+## 云端账号数据库
+
+云端注册及修改密码使用独立的 Supabase PostgreSQL 数据库，通过主键约束保证用户名与密码版本记录不能被并发覆盖。菜谱、照片、收藏、权限、会话签名和日志继续保存在原 EdgeOne Blob。
+
+在 Supabase 新建项目，在 SQL Editor 执行 [scripts/setup-supabase.sql](scripts/setup-supabase.sql)，然后在 EdgeOne 生产环境配置 `FENGWEI_SUPABASE_URL`（项目 URL）和 `FENGWEI_SUPABASE_SECRET_KEY`（以 `sb_secret_` 开头的服务端密钥），重新部署。密钥只放在 EdgeOne 环境变量中。操作步骤见部署说明的“账号数据库初始化”。
+
+访问 `/api/health` 返回 HTTP 200 和 `{"ok":true,"registration":true}` 表示账号数据库读写与唯一约束均通过验证。首次接入时，已有账号及密码版本在读取时迁移，账号 ID、当前密码和收藏归属保持不变。接入后删除或更换数据库配置会停止账号访问，不会回退到旧 Blob 密码。未配置过数据库时原账号仍可登录，注册提示服务尚未完成配置。本地开发仍使用原子 FileStore，无需 Supabase。
+
 ## 直接上传部署到 EdgeOne
 
 完整操作见 [DEPLOY-EDGEONE.md](DEPLOY-EDGEONE.md)。
@@ -81,7 +89,8 @@ npm run build
 - server/accounts.mjs：唯一账号 ID、昵称与密码哈希。
 - server/favorites.mjs：独立收藏与原账号收藏迁移。
 - server/edgeone.mjs：EdgeOne Blob 云端适配。
-- server/edgeone-store.mjs：账号条件写入适配，使用同一 Blob 存储的临时凭据向 COS 发起固定起点的 APPEND 请求。
+- server/account-store.mjs：Supabase 账号存储、原子占用、旧 Blob 账号迁移和数据库绑定。
+- scripts/setup-supabase.sql：账号表、主键约束和服务端访问权限。
 - server/file-store.mjs：本地持久化适配。
 - scripts/build-edgeone.mjs：编译云函数与 SDK、生成上传目录。
 - DEPLOY-EDGEONE.md：生产环境设置、部署与迁移说明。
@@ -94,7 +103,7 @@ npm run build
 
 - 管理员身份绑定原 wupanfeng 账号的固定 ID，普通账号不能通过同名或传入 role/canEdit 字段提升权限。
 - 新注册及已有普通账号默认只有共享菜谱查看权限，个人收藏仍独立保存。编辑申请需填写 5～500 字原因；管理员批准或拒绝时可写备注，获批后可撤销。每次接口请求读取当前权限，旧 Cookie 不会保留已撤销的编辑权。
-- 用户名原子占用使用存储的 onlyIfNew 条件写入；失败时不会退回“先读后写”的防重方式。本地 FileStore 使用原子文件链接。Blob SDK 0.0.18 的网关不保证 onlyIfNew，版本化 COS 存储也不执行 x-cos-forbid-overwrite。云端账号适配器使用 SDK 获取的临时凭据，向同一 COS 存储发送签名的 APPEND 请求，始终指定 position=0 并写入非空 JSON；相同对象只允许第一次写入，之后因起点不等于长度而被原子拒绝，已有 normal 对象也不会被覆盖。普通菜谱读写仍使用 Blob SDK，存储路径和已有数据不变。此适配器依赖固定的 SDK 0.0.18 内部客户端接口，升级 SDK 时须运行适配测试。部署后可访问 /api/health 检查注册能力，不创建测试账号、不返回私有数据；若底层存储不允许 APPEND 或不执行起点校验，检查失败并停止注册和密码修改。
+- 用户名原子占用使用存储的 onlyIfNew 条件写入；失败时不会退回“先读后写”的防重方式。本地 FileStore 使用原子文件链接；云端账号使用 Supabase 表的 `(namespace, key)` 主键与 `ON CONFLICT DO NOTHING` 原子插入。同名并发注册只允许一个成功，其他请求读取已存在记录并返回冲突。账号数据表启用 RLS，浏览器角色没有读取权限。`/api/health` 检查数据库能力，不创建测试账号或返回私有数据。
 - 原注册请求重试保持同一个账号 ID。历史重名账号保留各自 ID 和数据，新注册不能再占用这些名字；历史重名账号用 ID 登录。
 - 日志索引保存在 private/audit/，菜谱修改和授权行为还会随对应持久化记录保存操作凭据，索引写入故障不会让已保存的菜谱报保存失败。权限与申请保存在 private/permissions/、private/permission-requests/；这些数据不会作为菜谱 JSON 备份导出。只有管理员能读取账号列表和日志；日志支持搜索、结果筛选和每页 50 条的加载。
 - 服务端记录注册、登录、退出、同步、收藏、菜谱新增/修改/删除/导入/恢复与授权行为，以及失败或被权限拦截的写入。查看菜谱、跟着做与导出备份由在线页面上报；离线浏览不记录。日志不会写入密码、密码哈希或 Cookie。

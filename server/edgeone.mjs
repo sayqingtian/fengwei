@@ -2,7 +2,7 @@ import { getStore } from '@edgeone/pages-blob';
 import { RecipeDatabase } from './database.mjs';
 import { createApi } from './api.mjs';
 import { publicEdgeOneRequest, DEFAULT_PUBLIC_ORIGIN } from './edgeone-request.mjs';
-import { withAtomicWrites } from './edgeone-store.mjs';
+import { createAccountStore } from './account-store.mjs';
 
 let handler;
 export default async function onRequest({ request, env = {} }) {
@@ -13,7 +13,12 @@ export default async function onRequest({ request, env = {} }) {
     // Uses EdgeOne's injected server credential. No storage token is shipped to
     // the browser. Do not use the function's ephemeral filesystem as a database.
     try {
-      const store = withAtomicWrites(getStore({ name: process.env.FENGWEI_STORE_NAME || 'fengwei-recipes', consistency: 'strong' }));
+      const blobNamespace = process.env.FENGWEI_STORE_NAME || env.FENGWEI_STORE_NAME || 'fengwei-recipes';
+      const store = createAccountStore(getStore({ name: blobNamespace, consistency: 'strong' }), {
+        url: process.env.FENGWEI_SUPABASE_URL || env.FENGWEI_SUPABASE_URL,
+        secretKey: process.env.FENGWEI_SUPABASE_SECRET_KEY || env.FENGWEI_SUPABASE_SECRET_KEY,
+        namespace: process.env.FENGWEI_ACCOUNT_NAMESPACE || env.FENGWEI_ACCOUNT_NAMESPACE || blobNamespace,
+      });
       handler = createApi({ database: new RecipeDatabase(store) });
     } catch {
       return Response.json({ error: '服务器持久化存储尚未连接，请检查 EdgeOne 的 Blob 服务是否可用。', code: 'STORAGE_UNAVAILABLE' }, { status: 503, headers: { 'Cache-Control': 'private, no-store', 'Vary': 'Cookie' } });

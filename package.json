@@ -13,6 +13,7 @@
     "@edgeone/pages-blob": "0.0.18"
   },
   "devDependencies": {
+    "@electric-sql/pglite": "0.5.9",
     "esbuild": "0.25.12"
   }
 }

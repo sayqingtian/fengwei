@@ -1,6 +1,25 @@
 # 峰味：多账号版部署
 
-本版支持注册、账号 ID 登录、Cookie 免登录、共享菜谱与独立收藏。继续使用现有 EdgeOne Blob，不需要另开数据库。
+本版支持注册、账号 ID 登录、Cookie 免登录、共享菜谱与独立收藏。账号及密码使用 Supabase PostgreSQL；菜谱、照片、收藏、权限、会话签名和日志继续使用现有 EdgeOne Blob。
+
+## 账号数据库初始化
+
+1. 打开 [Supabase Dashboard](https://supabase.com/dashboard)，登录后创建项目。可先使用 Free 方案。项目数据库密码由你自行设置，与峰味账号密码无关。
+2. 在项目的 SQL Editor 中，新建查询，粘贴本仓库 [scripts/setup-supabase.sql](scripts/setup-supabase.sql) 的完整内容并执行。脚本创建 `fengwei_account_records`，主键保证相同账号记录只能占用一次；启用 RLS 并关闭浏览器角色访问。脚本可重复执行，不删除已有记录。
+3. 从项目 Connect 面板或 Settings 获取 Project URL，并从 API Keys 获取一个以 `sb_secret_` 开头的服务端 Secret Key。不要使用 `sb_publishable_` 或 anon key。旧的 service_role JWT 也兼容，但新项目建议使用 Secret Key。
+4. 在 EdgeOne 项目的生产环境变量中设置下表的两个必填值。只在控制台填写密钥，不提交 Git，不放到前端代码，也无需发到聊天里。保存后重新部署，使环境变量生效。
+
+| 环境变量 | 值 |
+| --- | --- |
+| `FENGWEI_SUPABASE_URL` | Supabase Project URL，例如 `https://your-project.supabase.co` |
+| `FENGWEI_SUPABASE_SECRET_KEY` | Supabase 服务端 Secret Key，通常以 `sb_secret_` 开头 |
+| `FENGWEI_ACCOUNT_NAMESPACE`（可选） | 默认沿用 Blob 命名空间 `fengwei-recipes`；已有数据时保持不变 |
+
+5. 访问网站的 `/api/health`。HTTP 200 且返回 `{"ok":true,"registration":true}` 表示数据库连接、条件插入和读取均正常。再注册账号并验证登录。HTTP 503 的 `ACCOUNT_DATABASE_NOT_CONFIGURED` 表示缺少环境变量；`ACCOUNT_DATABASE_AUTH_FAILED` 表示密钥或数据库权限不正确；`ACCOUNT_DATABASE_SCHEMA_REQUIRED` 表示尚未建表或项目 URL 不正确；`ACCOUNT_DATABASE_CONNECTION_FAILED` 表示数据库无法连接。
+
+原 Blob 中的用户资料、用户名占用、注册重试记录、密码版本及密码头索引会在读取时迁入 SQL，已有账号 ID、当前密码、管理员身份和收藏归属保持不变。迁移采用只插入、不覆盖已有 SQL 记录的方式；先保留原 Blob 作为迁移来源。首次正常连接后会记录数据库绑定，之后不能通过移除数据库配置回退到旧密码。更换 Supabase 项目或 namespace 需要先迁移账号数据，不要把改环境变量作为数据迁移方式。
+
+本地开发继续使用 `.data/fengwei`，不需要配置 Supabase。SQL 数据库与 Blob 均需独立备份，菜谱 JSON 备份不包含账号、密码、权限或日志。Supabase Free 项目长期低活跃可能暂停，需在控制台恢复；详情见 [项目暂停说明](https://supabase.com/docs/guides/platform/free-project-pausing)。
 
 ## GitHub 关联部署
 
@@ -19,7 +38,7 @@
 
 部署后先从控制台复制默认访问地址进行检查。若使用默认域名或其他自定义域名，在该部署环境将 `PUBLIC_ORIGIN` 设置为实际的完整 HTTPS 网站入口，例如 `https://your-project.edgeone.app`；使用 `https://www.wupanfeng.dpdns.org` 时可以沿用代码默认值。修改环境变量后重新部署。
 
-访问 `/api/health` 可检查注册存储能力。HTTP 200 且返回 `{"ok":true,"registration":true}` 表示 APPEND 起点条件已验证；检查不创建账号，也不返回存储凭据。HTTP 503 的 `code` 为安全的故障类别，可结合函数日志排查。此检查同样用于注册及修改密码，不支持条件写入时不会跳过保护。
+访问 `/api/health` 可检查账号数据库能力；初始化步骤和错误码见上方“账号数据库初始化”。检查不创建账号，也不返回存储凭据。注册及修改密码使用相同的唯一约束检查，不支持条件写入时不会跳过保护。
 
 自定义域名需在新项目的域名管理中绑定，DNS CNAME 必须使用新项目控制台显示的值。首页和 `/api/me` 都返回 EdgeOne 的 `404 NOT_FOUND` / “The site does not exist” 时，先检查生产部署是否成功以及域名绑定；这类响应不是注册接口返回的错误。首页正常、API 返回 404 时，检查是否误将输出目录设为只有前端的 `dist`。
 
@@ -75,7 +94,7 @@
 
 菜谱与照片使用同源登录 API，接口响应禁止缓存。照片按内容摘要复用，每次共享菜谱保存和删除都保留独立版本。过期编辑会报冲突，草稿保留；真正同时编辑时双方版本保留，可通过历史恢复。
 
-Blob SDK 0.0.18 的网关没有可靠的 onlyIfNew 原子写保证，COS 的 x-cos-forbid-overwrite 在版本化存储桶中也不生效。云端账号适配器使用同一 SDK 的临时凭据，向 COS 发送签名的 APPEND 请求并始终指定 position=0。非空记录只允许初次创建，重复起点写入和对已有 normal 对象的写入都会被拒绝；普通菜谱、照片和收藏仍通过 Blob SDK 访问同一命名空间。注册与修改密码在运行时验证底层条件写入，APPEND 权限或起点校验不支持时停止操作。注册请求使用随机请求编号，网络丢失后重试同一请求会返回相同账号，用户名仍唯一。收藏使用独立不可变事件，同一个账号的同时修改按事件顺序选择当前状态。
+Blob SDK 0.0.18 的网关没有可靠的 onlyIfNew 原子写保证，因此账号与密码版本改用 Supabase PostgreSQL。`fengwei_account_records` 表通过 `(namespace, key)` 主键与 `ON CONFLICT DO NOTHING` 保证原子占用；普通菜谱、照片和收藏仍通过 Blob SDK 访问同一命名空间。注册与修改密码在运行时验证数据库条件写入，不可用时停止操作。注册请求使用随机请求编号，网络丢失后重试同一请求会返回相同账号，用户名仍唯一。收藏使用独立不可变事件，同一个账号的同时修改按事件顺序选择当前状态。
 
 账户免费存储额度以控制台为准。历史版本和照片目前不会自动清理，建议定期导出备份。部署包不包含本地数据库、密码明文、个人备份或测试数据。
 
@@ -92,4 +111,5 @@ npm run dev 默认只监听 localhost:4173。本地文件数据库位于 .data/f
 - [直接上传](https://pages.edgeone.ai/document/direct-upload)
 - [Node.js 云函数](https://pages.edgeone.ai/document/node-functions)
 - [Blob 存储](https://pages.edgeone.ai/document/blob-storage)
-- [COS APPEND Object](https://cloud.tencent.com/document/product/436/7741)
+- [Supabase API Keys](https://supabase.com/docs/guides/getting-started/api-keys)
+- [PostgREST Upsert](https://docs.postgrest.org/en/stable/references/api/tables_views.html#upsert)

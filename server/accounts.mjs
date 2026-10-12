@@ -7,16 +7,14 @@ const problem = (status, code, message) => Object.assign(new Error(message), { s
 const uniqueWriteChecks = new WeakMap();
 export async function requireUniqueWrites(store) {
   if (!uniqueWriteChecks.has(store)) uniqueWriteChecks.set(store, (async () => {
-    // Separate the APPEND capability check from the old normal PUT probe.
-    // This ensures the cloud provider has actually created an appendable record.
-    const key = 'private/registration-storage-check-v2.json';
+    // A fresh probe avoids importing failed capability checks from Blob.
+    const key = 'private/registration-storage-check-v3.json';
     try { await store.setJSON(key, { marker: 'protected' }, { onlyIfNew: true, cacheControl: 'no-store' }); }
     catch (error) { if (error.code !== 'PRECONDITION_FAILED') throw error; }
     try { await store.setJSON(key, { marker: 'conditional-write-unsupported' }, { onlyIfNew: true, cacheControl: 'no-store' }); }
     catch (error) {
       if (error.code !== 'PRECONDITION_FAILED') throw error;
-      // Verify the ordinary Blob reader sees the unchanged native COS record.
-      // A successful reservation is useful only if account reads are durable.
+      // Verify the account reader sees the unchanged, durable record.
       const probe = await store.get(key, { type: 'json', consistency: 'strong' });
       if (probe?.marker === 'protected') return;
       throw problem(503, 'UNIQUE_STORAGE_UNAVAILABLE', '注册暂时不可用，请稍后重试或联系管理员。');
