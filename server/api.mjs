@@ -2,7 +2,7 @@ import { hash } from './database.mjs';
 import { validateRecipe } from '../dist/store.js';
 import { createAuth, testAccount, sessionCookie } from './auth.mjs';
 import { readJsonBody as body } from './json-body.mjs';
-import { publicUser } from './accounts.mjs';
+import { publicUser, requireUniqueWrites } from './accounts.mjs';
 import { Favorites } from './favorites.mjs';
 import { AuditLog } from './audit.mjs';
 import { makeAuditExport } from './audit-export.mjs';
@@ -41,6 +41,17 @@ export function createApi({ database, password }) {
       if (url.protocol !== 'https:' && !['localhost', '127.0.0.1', '[::1]'].includes(url.hostname)) fail(400, 'HTTPS_REQUIRED', '请通过 HTTPS 正式网址使用私人菜谱本。');
       if (!['GET', 'POST', 'PUT', 'DELETE'].includes(method)) fail(405, 'METHOD_NOT_ALLOWED', '不支持的请求方式。');
       if (method !== 'GET') writableOrigin(request);
+      if (route === 'health' && method === 'GET') {
+        // No accounts or credentials are returned or created. This uses the
+        // same bounded capability check required before every registration.
+        try { await requireUniqueWrites(database.store); }
+        catch (error) {
+          console.error('Fengwei registration storage unavailable:', error.code || error.name);
+          const code = /^(UNIQUE_STORAGE_UNAVAILABLE|ATOMIC_STORAGE_(UNAVAILABLE|CONNECTION_FAILED|HTTP_\d{3}))$/.test(error.code || '') ? error.code : 'STORAGE_UNAVAILABLE';
+          return reply({ ok: false, registration: false, code }, 503);
+        }
+        return reply({ ok: true, registration: true });
+      }
       if (route === 'login' && method === 'POST') {
         action = 'account.login';
         const data = await body(request, 4096);

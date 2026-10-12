@@ -5,7 +5,7 @@ export const isUserId = value => typeof value === 'string' && /^usr_[a-f0-9]{32}
 const derive = (password, salt) => new Promise((resolve, reject) => scrypt(password, salt, 32, (error, value) => error ? reject(error) : resolve(value)));
 const problem = (status, code, message) => Object.assign(new Error(message), { status, code });
 const uniqueWriteChecks = new WeakMap();
-async function requireUniqueWrites(store) {
+export async function requireUniqueWrites(store) {
   if (!uniqueWriteChecks.has(store)) uniqueWriteChecks.set(store, (async () => {
     const key = 'private/registration-storage-check.json';
     try { await store.setJSON(key, { marker: 'protected' }, { onlyIfNew: true, cacheControl: 'no-store' }); }
