@@ -2,7 +2,28 @@
 
 本版支持注册、账号 ID 登录、Cookie 免登录、共享菜谱与独立收藏。继续使用现有 EdgeOne Blob，不需要另开数据库。
 
-## 上传新版
+## GitHub 关联部署
+
+在 EdgeOne 导入此仓库后，根目录保留 `./`，框架预设选择 Other。根目录的 `edgeone.json` 会覆盖安装、构建及输出目录设置；也可以在“项目设置 → 构建部署配置”中填写：
+
+| 设置 | 值 |
+| --- | --- |
+| 根目录 | `./` |
+| 框架预设 | Other |
+| 安装命令 | `npm ci` |
+| 构建命令 | `npm run build` |
+| 输出目录 | `artifacts/fengwei-edgeone` |
+| Node.js | `22.11.0` |
+
+`npm run build` 会在输出目录生成根部首页、静态文件、编译后的云函数与存储 SDK。仓库根部的 `cloud-functions/api/[[default]].js` 供 Git 部署识别云函数；它与 ZIP 构建使用同一个服务端入口。生成的 ZIP 包仅供直接上传，无需提交到 Git。
+
+部署后先从控制台复制默认访问地址进行检查。若使用默认域名或其他自定义域名，在该部署环境将 `PUBLIC_ORIGIN` 设置为实际的完整 HTTPS 网站入口，例如 `https://your-project.edgeone.app`；使用 `https://www.wupanfeng.dpdns.org` 时可以沿用代码默认值。修改环境变量后重新部署。
+
+自定义域名需在新项目的域名管理中绑定，DNS CNAME 必须使用新项目控制台显示的值。首页和 `/api/me` 都返回 EdgeOne 的 `404 NOT_FOUND` / “The site does not exist” 时，先检查生产部署是否成功以及域名绑定；这类响应不是注册接口返回的错误。首页正常、API 返回 404 时，检查是否误将输出目录设为只有前端的 `dist`。
+
+如果 GitHub 关联创建了一个新项目，原直接上传项目的 Blob 不会自动迁移。保留旧项目，在旧网站导出 JSON 备份，再在新网站使用管理员账号导入菜谱。
+
+## 直接上传新版
 
 在原 EdgeOne Pages 项目中，新建生产部署，上传 artifacts/fengwei-edgeone-multiuser.zip 的整个 ZIP。根目录直接是 index.html，并包含 cloud-functions/api/[[default]].js。云函数和 SDK 已编译，无需在平台 npm install。
 

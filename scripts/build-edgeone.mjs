@@ -9,12 +9,11 @@ await mkdir(output, { recursive: true });
 await cp('dist', output, { recursive: true });
 const functionFile = resolve(output, 'cloud-functions', 'api', '[[default]].js');
 await mkdir(resolve(output, 'cloud-functions', 'api'), { recursive: true });
-await build({ entryPoints: ['server/edgeone.mjs'], outfile: functionFile, bundle: true, platform: 'node', format: 'esm', target: 'node20', minify: false });
+await build({ entryPoints: ['cloud-functions/api/[[default]].js'], outfile: functionFile, bundle: true, platform: 'node', format: 'esm', target: 'node20', minify: false });
 await writeFile(resolve(output, 'cloud-functions', 'package.json'), JSON.stringify({ type: 'module' }));
-await writeFile(resolve(output, 'edgeone.json'), JSON.stringify({ headers: [
-  { source: '/api/*', headers: [{ key: 'Cache-Control', value: 'private, no-store, max-age=0' }] },
-  { source: '/sw.js', headers: [{ key: 'Cache-Control', value: 'no-cache' }] },
-] }, null, 2));
+// Direct uploads accept routing/header settings, not Git build settings.
+const { headers } = JSON.parse(await readFile('edgeone.json', 'utf8'));
+await writeFile(resolve(output, 'edgeone.json'), JSON.stringify({ headers }, null, 2));
 await writeFile(resolve(output, 'cloud-functions', 'SDK-LICENSE.txt'), 'Includes @edgeone/pages-blob 0.0.18, licensed under the MIT License.\nhttps://www.npmjs.com/package/@edgeone/pages-blob\n');
 const bundle = await readFile(functionFile, 'utf8');
 if (!bundle.includes('{{PAGES_BLOB_DEPLOY_CREDENTIAL}}')) throw new Error('Missing automatic EdgeOne Blob credential placeholder.');

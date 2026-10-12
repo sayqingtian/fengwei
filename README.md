@@ -2,7 +2,15 @@
 
 适合 iPhone 的中文网页 App。菜谱和照片保存在服务器，手机只保留离线查看缓存。支持唯一用户名注册、账号授权审批、管理员操作日志、唯一账号 ID、Cookie 免登录、共享菜谱、独立收藏与跨设备读取、菜谱增删改、照片、搜索、分类、收藏、跟着做、历史版本恢复和 JSON 备份。
 
-## 部署到 EdgeOne
+## 通过 GitHub 自动部署到 EdgeOne
+
+在 EdgeOne 导入此 GitHub 仓库，根目录使用仓库根目录 `./`，框架选择 Other。仓库中的 `edgeone.json` 指定安装命令 `npm ci`、构建命令 `npm run build`、输出目录 `artifacts/fengwei-edgeone` 和 Node.js 22.11.0。`cloud-functions/api/[[default]].js` 是平台识别的云函数入口。
+
+不要把输出目录设为仓库根目录或 `dist`：仓库根目录没有首页，`dist` 只有前端、不包含注册和登录接口。部署完成后先检查项目默认访问地址，再绑定自定义域名。使用 `https://www.wupanfeng.dpdns.org` 以外的入口时，在对应环境设置 `PUBLIC_ORIGIN` 为该入口的完整 HTTPS 域名，并重新部署。
+
+GitHub 关联项目与原直接上传项目是不同项目，Blob 数据不会自动迁移。迁移菜谱时，在旧网站导出 JSON 备份后，在新网站使用管理员账号导入。详情见 [DEPLOY-EDGEONE.md](DEPLOY-EDGEONE.md)。
+
+## 直接上传部署到 EdgeOne
 
 完整操作见 [DEPLOY-EDGEONE.md](DEPLOY-EDGEONE.md)。
 
