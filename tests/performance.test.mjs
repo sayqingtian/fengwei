@@ -100,6 +100,24 @@ test('parallel sync coalesces requests, batches photos, reuses unchanged photo u
   assert.equal(client.current().find(item => item.id === illustrated.id).photo, illustrated.photo);
 });
 
+test('an older server keeps receiving full photos until it explicitly supports photo references', async t => {
+  const f = await fixture(t), photo = 'data:image/png;base64,bGVnYWN5LXBob3Rv';
+  await f.database.commit({ id: 'rolling-deployment', recipe: recipe('rolling-deployment', photo), baseRevision: null, mutationId: randomUUID() });
+  const original = globalThis.fetch; t.after(() => { globalThis.fetch = original; }); let submitted;
+  globalThis.fetch = async (url, options = {}) => {
+    const target = new URL(url), path = target.pathname.split('/api/')[1] + target.search;
+    if (path === 'photos') return Response.json({ code: 'NOT_FOUND', error: '旧接口不支持批量照片' }, { status: 404 });
+    if (path.startsWith('recipe/')) submitted = JSON.parse(options.body);
+    const response = await f.api(new Request(`https://recipes.test/api/${path}`, { ...options, headers: { ...options.headers, Cookie: f.cookie, Origin: 'https://recipes.test' } }));
+    if (path === 'recipes') { const data = await response.json(); delete data.capabilities; delete data.user; return Response.json(data); }
+    return response;
+  };
+  const client = await createRemoteStore(), items = await client.all(); assert.equal(items[0].photo, photo);
+  await client.put({ ...items[0], notes: '旧服务器也能安全保存文字和照片' });
+  assert.equal(submitted.recipe.photo, photo); assert.equal(submitted.photoHash, undefined);
+  assert.equal(client.current()[0].photo, photo);
+});
+
 test('an old sync response cannot replace the account or favorites after logout and login', async t => {
   const f = await fixture(t), registration = await f.call('register', 'POST', { displayName: '另一账号', password, registrationId: randomUUID() }), other = (await registration.json()).user;
   await f.database.commit({ id: 'shared', recipe: recipe('shared'), baseRevision: null, mutationId: randomUUID() });

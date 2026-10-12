@@ -24,10 +24,10 @@ export async function createRemoteStore(local) {
   let cacheWarning = !local;
   let accountEpoch = 0, syncing = null;
   const photoLoads = new Map();
-  let batchPhotos = true;
+  let batchPhotos = true, photoReferences = false;
   const apiBase = new URL('./api/', import.meta.url);
   function resetMemory() {
-    accountEpoch++; photoLoads.clear();
+    accountEpoch++; photoLoads.clear(); photoReferences = false;
     snapshot = null; records = []; revisions = Object.create(null); hashes = Object.create(null);
     conflicts = []; photoCache.clear(); user = null; authenticated = false; offline = false;
   }
@@ -125,7 +125,7 @@ export async function createRemoteStore(local) {
   async function write(id, recipe, method = 'PUT', options = {}) {
     ensureOnline();
     const valid = recipe ? validateRecipe(recipe) : null;
-    const reused = valid?.photo && hashes[id] && photoCache.get(hashes[id]) === valid.photo ? hashes[id] : '';
+    const reused = photoReferences && valid?.photo && hashes[id] && photoCache.get(hashes[id]) === valid.photo ? hashes[id] : '';
     const data = await request(`recipe/${encodeURIComponent(id)}`, { method, value: { ...(valid ? { recipe: { ...valid, photo: reused ? '' : valid.photo } } : {}), ...(reused ? { photoHash: reused } : {}), baseRevision: Object.hasOwn(options, 'baseRevision') ? options.baseRevision : revisions[id] || null, mutationId: createId(), ...(options.operation ? { operation: options.operation } : {}) } });
     await sameAccount(data);
     const item = data.item;
@@ -158,6 +158,7 @@ export async function createRemoteStore(local) {
           await acceptUser(principal); job.epoch = accountEpoch; first = false;
         }
         await sameAccount(data);
+        photoReferences = data.capabilities?.photoReferences === true;
         await loadPhotos(data.items);
         const hydrated = await parallel(data.items, hydrate);
         if (job.epoch !== accountEpoch) throw new ApiError('账号已切换，本次同步已取消。', 409, 'ACCOUNT_CHANGED');

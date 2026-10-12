@@ -205,7 +205,7 @@ export function createApi({ database, password }) {
         if (cursor && !/^[a-f0-9]{64}$/.test(cursor)) fail(400, 'INVALID_CURSOR', '分页位置不正确。');
         const [result, states] = await Promise.all([database.list(cursor), favorites.states(user.id)]);
         if (!cursor) { action = 'recipes.sync'; await record('success'); }
-        return reply({ userId: user.id, user, items: result.items.map(event => publicEvent(event, favorites.value(event, user.id, states))), cursor: result.cursor });
+        return reply({ userId: user.id, user, capabilities: { photoReferences: true }, items: result.items.map(event => publicEvent(event, favorites.value(event, user.id, states))), cursor: result.cursor });
       }
       if (route.startsWith('photo/') && method === 'GET') {
         const photo = await database.photo(route.slice(6));
