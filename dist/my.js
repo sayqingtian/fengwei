@@ -2,6 +2,7 @@ export const roleName = user => user?.role === 'admin' ? '管理员' : user?.can
 export const actionNames = {
   'account.register': '注册账号', 'account.login': '登录', 'account.logout': '退出登录',
   'account.password': '修改密码', 'audit.export': '导出操作日志',
+  'account.recovery.request': '申请找回密码', 'account.recovery.reset': '管理员重置密码', 'account.recovery.reject': '拒绝找回申请',
   'recipes.sync': '同步菜谱', 'recipe.view': '查看菜谱', 'recipe.history': '查看历史版本',
   'recipe.create': '新增菜谱', 'recipe.update': '编辑菜谱', 'recipe.delete': '删除菜谱',
   'recipe.restore': '恢复历史版本', 'recipe.import': '导入菜谱', 'recipe.favorite': '收藏操作',
@@ -17,8 +18,8 @@ export function myPages({ icon, esc }) {
   const link = (page, mark, title, note) => `<button class="my-link" data-action="navigate" data-page="${page}"><span class="panel-icon">${icon(mark)}</span><span><strong>${title}</strong><small>${note}</small></span>${icon('arrow')}</button>`;
   return {
     back,
-    overview(user, favoriteCount) {
-      return `<h1 class="page-title">我的</h1><p class="page-lead">管理自己的账号、权限和菜谱备份。</p><section class="panel my-profile"><div class="panel-icon">${icon('people')}</div><div><h2>${esc(user?.displayName || '')}</h2><p><span class="role-badge">${roleName(user)}</span> · ${favoriteCount} 道个人收藏</p></div></section><div class="my-sections"><section class="panel"><h2>账号与权限</h2>${link('account', 'people', '我的账号', '用户名、登录 ID 与登录状态')}${user?.role !== 'admin' ? link('permissions', 'lock', '账号授权', '说明申请原因，查看审批结果') : ''}</section><section class="panel"><h2>数据管理</h2>${link('backup', 'backup', '菜谱备份', '下载备份、导入菜谱与恢复数据')}</section>${user?.role === 'admin' ? `<section class="panel"><h2>管理员工具</h2>${link('permissions', 'lock', '账号授权', '审批编辑申请，管理与撤销账号权限')}${link('logs', 'clock', '操作日志', '查看用户行为，按账号与操作搜索')}</section>` : ''}</div>`;
+    overview(user, favoriteCount, recoveryCount = 0) {
+      return `<h1 class="page-title">我的</h1><p class="page-lead">管理自己的账号、权限和菜谱备份。</p><section class="panel my-profile"><div class="panel-icon">${icon('people')}</div><div><h2>${esc(user?.displayName || '')}</h2><p><span class="role-badge">${roleName(user)}</span> · ${favoriteCount} 道个人收藏</p></div></section><div class="my-sections"><section class="panel"><h2>账号与权限</h2>${link('account', 'people', '我的账号', '用户名、登录 ID 与登录状态')}${user?.role !== 'admin' ? link('permissions', 'lock', '账号授权', '说明申请原因，查看审批结果') : ''}</section><section class="panel"><h2>数据管理</h2>${link('backup', 'backup', '菜谱备份', '下载备份、导入菜谱与恢复数据')}</section>${user?.role === 'admin' ? `<section class="panel"><h2>管理员工具</h2>${link('permissions', 'lock', '账号授权', '审批编辑申请，管理与撤销账号权限')}${link('recovery', 'lock', '密码找回', recoveryCount ? `${recoveryCount} 条待处理申请，请核实身份后重置` : '查看找回申请，重置后线下告知用户')}${link('logs', 'clock', '操作日志', '查看用户行为，按账号与操作搜索')}</section>` : ''}</div>`;
     },
     permissions(user, data, error = '') {
       const admin = user?.role === 'admin';

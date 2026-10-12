@@ -1,4 +1,5 @@
 import { myPages, roleName } from './my.js';
+import { recoveryPages } from './recovery.js';
 import { CATEGORIES, createId, openStore, validateRecipe, filterRecipes, makeBackup, parseBackup, planImport, isPhoto } from './store.js';
 
 const $ = (selector, root = document) => root.querySelector(selector);
@@ -31,6 +32,7 @@ const paths = {
 };
 const icon = name => `<svg class="icon" viewBox="0 0 24 24" aria-hidden="true">${paths[name] || paths.book}</svg>`;
 const my = myPages({ icon, esc });
+const recoveryView = recoveryPages({ icon, esc });
 const bowlArt = `<svg viewBox="0 0 140 140" aria-hidden="true"><g fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><ellipse cx="70" cy="60" rx="47" ry="14"/><path d="M23 60c4 40 21 55 47 55s43-15 47-55M53 120h34M56 36c-12-13 12-14 0-27M72 34c-12-13 12-14 0-27"/><path d="M83 53c-2-20 10-31 28-29 3 17-8 30-28 29Zm1-1 16-16"/></g><ellipse cx="67" cy="63" rx="33" ry="7" fill="currentColor" opacity=".15"/></svg>`;
 const heroArt = `<svg viewBox="0 0 360 270" aria-hidden="true"><ellipse cx="185" cy="240" rx="144" ry="13" fill="#e9ebdf"/><g transform="rotate(-9 171 149)"><rect x="78" y="45" width="178" height="194" rx="9" fill="#cdd8b4"/><rect x="89" y="42" width="161" height="187" rx="5" fill="#fffdf1" stroke="#dfe2ce"/><path d="M109 42v187" stroke="#dacdb9" stroke-width="1.3"/><path d="M132 77h94M132 95h55M132 170h87M132 188h76M132 205h88" stroke="#dce1cf" stroke-width="3" stroke-linecap="round"/><text x="132" y="148" fill="#647b56" font-family="serif" font-size="28">好好吃饭</text><g fill="none" stroke="#6f8260" stroke-width="3"><path d="M100 65c-22-11-22 10 0 9M100 104c-22-11-22 10 0 9M100 143c-22-11-22 10 0 9M100 182c-22-11-22 10 0 9"/></g></g><g transform="rotate(12 278 166)"><path d="M268 97h14v128l-7 16-7-16Z" fill="#c88b58"/><path d="M270 103h4v122" stroke="#eccca6" stroke-width="3"/><path d="m268 225 7 16 7-16" fill="#e7d4a7"/><path d="m272 235 3 6 3-6" fill="#4b5c43"/></g><g fill="#8f9f70"><path d="M281 81c-10-38 18-60 49-54-2 34-20 55-49 54Z"/><path d="M286 82c26-4 44 11 47 35-24 5-44-7-47-35Z"/></g><path d="m275 101 39-62M287 83l31 22" stroke="#526d49" stroke-width="2" fill="none"/><circle cx="65" cy="211" r="23" fill="#c9754c"/><path d="m53 192 12 5 9-7-4 11 10 6-13-1-7 8 1-12Z" fill="#6d8359"/><path d="M52 217c2 6 6 8 11 9" stroke="#dfaa83" stroke-width="3" stroke-linecap="round" fill="none"/><path d="m42 101 3 6 7 1-6 5 1 7-6-4-6 4 1-7-5-5 7-1Z" fill="#d2bb8e"/><path d="M302 196h12m-6-6v12" stroke="#b3ba91" stroke-width="2" stroke-linecap="round"/></svg>`;
 
@@ -41,6 +43,7 @@ let historyItems = [], legacyCount = 0, registrationId = null, authBusy = false;
 let permissionData = null, permissionError = '', permissionRequestId = createId(), permissionDecision = null;
 let auditData = null, auditQuery = '', auditResult = '', auditError = '', auditLoading = false;
 let passwordMutationId = null, passwordBusy = false, auditExportBusy = false;
+let recoveryRequestId = null, recoveryData = null, recoveryError = '', recoveryLoading = false, recoveryDecision = null, recoveryBusy = false;
 const channel = typeof BroadcastChannel !== 'undefined' ? new BroadcastChannel('fengwei-changes') : null;
 const date = value => new Intl.DateTimeFormat('zh-CN', { year: 'numeric', month: 'long', day: 'numeric' }).format(new Date(value));
 const errorText = error => error?.name === 'QuotaExceededError' ? '手机存储空间不足，未能保存。请释放空间后重试。' : error?.message || '操作未完成，请重试';
@@ -52,11 +55,11 @@ function toast(message) {
 }
 
 function nav(mobile = false) {
-  return `<nav class="${mobile ? 'mobile-nav' : 'desktop-nav'}" aria-label="${mobile ? '底部' : '主'}导航">${[['recipes', 'book', '菜谱本'], ['favorites', 'heart', '收藏夹'], ['my', 'people', '我的']].map(([id, mark, name]) => `<button class="nav-item ${(page === id || (id === 'my' && ['backup', 'account', 'permissions', 'logs'].includes(page))) ? 'active' : ''}" data-action="navigate" data-page="${id}" ${(page === id || (id === 'my' && ['backup', 'account', 'permissions', 'logs'].includes(page))) ? 'aria-current="page"' : ''}>${icon(mark)}<span>${name}</span></button>`).join('')}</nav>`;
+  return `<nav class="${mobile ? 'mobile-nav' : 'desktop-nav'}" aria-label="${mobile ? '底部' : '主'}导航">${[['recipes', 'book', '菜谱本'], ['favorites', 'heart', '收藏夹'], ['my', 'people', '我的']].map(([id, mark, name]) => `<button class="nav-item ${(page === id || (id === 'my' && ['backup', 'account', 'permissions', 'logs', 'recovery'].includes(page))) ? 'active' : ''}" data-action="navigate" data-page="${id}" ${(page === id || (id === 'my' && ['backup', 'account', 'permissions', 'logs', 'recovery'].includes(page))) ? 'aria-current="page"' : ''}>${icon(mark)}<span>${name}</span></button>`).join('')}</nav>`;
 }
 
 function render() {
-  $('#app').innerHTML = `<a class="skip-link" href="#main">跳到菜谱内容</a><div class="shell"><header class="header"><div class="brand"><div class="brand-icon">${icon('bowl')}</div><div><div class="brand-name">峰味</div><div class="brand-caption">共享菜谱，自己的收藏</div></div></div>${nav()}<span class="private-pill">${icon('people')}共享菜谱 · 独立收藏</span></header>${syncBar()}<main id="main">${page === 'my' ? my.overview(db?.user, recipes.filter(item => item.favorite).length) : page === 'backup' ? my.back() + backupPage() : page === 'account' ? my.back() + accountPage() : page === 'permissions' ? my.permissions(db?.user, permissionData, permissionError) : page === 'logs' ? my.logs(db?.user, auditData, { query: auditQuery, result: auditResult, error: auditError, loading: auditLoading, exporting: auditExportBusy }) : recipePage()}</main><footer class="footer"><span>一餐一饭，都是生活的小事。</span><span>${icon('leaf')}把好味道分享给彼此</span></footer></div>${nav(true)}`;
+  $('#app').innerHTML = `<a class="skip-link" href="#main">跳到菜谱内容</a><div class="shell"><header class="header"><div class="brand"><div class="brand-icon">${icon('bowl')}</div><div><div class="brand-name">峰味</div><div class="brand-caption">共享菜谱，自己的收藏</div></div></div>${nav()}<span class="private-pill">${icon('people')}共享菜谱 · 独立收藏</span></header>${syncBar()}<main id="main">${page === 'my' ? my.overview(db?.user, recipes.filter(item => item.favorite).length, recoveryData?.requests.filter(item => item.status === 'pending').length || 0) : page === 'backup' ? my.back() + backupPage() : page === 'account' ? my.back() + accountPage() : page === 'permissions' ? my.permissions(db?.user, permissionData, permissionError) : page === 'recovery' ? my.back() + recoveryView.inbox(db?.user, recoveryData, { error: recoveryError, loading: recoveryLoading }) : page === 'logs' ? my.logs(db?.user, auditData, { query: auditQuery, result: auditResult, error: auditError, loading: auditLoading, exporting: auditExportBusy }) : recipePage()}</main><footer class="footer"><span>一餐一饭，都是生活的小事。</span><span>${icon('leaf')}把好味道分享给彼此</span></footer></div>${nav(true)}`;
   if (['recipes', 'favorites'].includes(page)) renderResults();
 }
 
@@ -67,10 +70,30 @@ function syncBar() {
 function showLogin(message = '登录查看所有共享菜谱，收藏夹只记录你喜欢的菜。', mode = 'login') {
   $('#app').inert = true; $('#modal-root').inert = true;
   const register = mode === 'register';
-  let remembered = 'wupanfeng'; try { remembered = localStorage.getItem('fengwei-last-account-id') || remembered; } catch {}
   if (register) registrationId = createId();
-  $('#auth-root').innerHTML = `<div class="auth-overlay"><section class="auth-panel" role="dialog" aria-modal="true" aria-labelledby="auth-title"><span class="boot-mark">峰味</span><h1 id="auth-title">${register ? '注册自己的账号' : '打开共享菜谱本'}</h1><p>${esc(message)}</p><div class="auth-tabs" role="group" aria-label="登录或注册"><button class="${register ? '' : 'active'}" data-action="auth-login" aria-pressed="${!register}">登录账号</button><button class="${register ? 'active' : ''}" data-action="auth-register" aria-pressed="${register}">注册账号</button></div><form id="${register ? 'register-form' : 'login-form'}">${register ? '<label class="field"><span class="field-label">用户名</span><input id="register-name" name="displayName" type="text" autocomplete="username" required maxlength="30" placeholder="设置唯一用户名"></label>' : `<label class="field"><span class="field-label">账号</span><input id="login-username" name="username" type="text" autocomplete="username" required maxlength="64" value="${esc(remembered)}" placeholder="用户名或账号 ID" autocapitalize="none" spellcheck="false"></label>`}<label class="field"><span class="field-label">密码</span><input id="access-password" name="password" type="password" autocomplete="${register ? 'new-password' : 'current-password'}" required ${register ? 'minlength="8" maxlength="128" placeholder="设置至少 8 位密码"' : 'maxlength="256" placeholder="输入密码"'}></label>${register ? '<label class="field"><span class="field-label">确认密码</span><input id="register-confirm" type="password" autocomplete="new-password" required minlength="8" maxlength="128" placeholder="再次输入密码"></label><p class="small-note">用户名只能注册一次，不区分大小写和首尾空格。注册后可以用用户名或账号 ID 登录。</p>' : ''}<p id="login-error" class="form-error" role="alert" hidden></p><button class="button primary" type="submit">${register ? '注册并登录' : '打开菜谱本'}</button></form><p class="small-note">保持登录 90 天。普通账号默认仅可查看菜谱，编辑需要管理员授权；收藏各自独立。</p></section></div>`;
-  (register ? $('#register-name') : $('#access-password')).focus();
+  $('#auth-root').innerHTML = `<div class="auth-overlay"><section class="auth-panel" role="dialog" aria-modal="true" aria-labelledby="auth-title"><span class="boot-mark">峰味</span><h1 id="auth-title">${register ? '注册自己的账号' : '打开共享菜谱本'}</h1><p>${esc(message)}</p><div class="auth-tabs" role="group" aria-label="登录或注册"><button class="${register ? '' : 'active'}" data-action="auth-login" aria-pressed="${!register}">登录账号</button><button class="${register ? 'active' : ''}" data-action="auth-register" aria-pressed="${register}">注册账号</button></div><form id="${register ? 'register-form' : 'login-form'}">${register ? '<label class="field"><span class="field-label">用户名</span><input id="register-name" name="displayName" type="text" autocomplete="username" required maxlength="30" placeholder="设置唯一用户名"></label>' : `<label class="field"><span class="field-label">账号</span><input id="login-username" name="username" type="text" autocomplete="username" required maxlength="64" placeholder="用户名或账号 ID" autocapitalize="none" spellcheck="false"></label>`}<label class="field"><span class="field-label">密码</span><input id="access-password" name="password" type="password" autocomplete="${register ? 'new-password' : 'current-password'}" required ${register ? 'minlength="8" maxlength="128" placeholder="设置至少 8 位密码"' : 'maxlength="256" placeholder="输入密码"'}></label>${register ? '<label class="field"><span class="field-label">确认密码</span><input id="register-confirm" type="password" autocomplete="new-password" required minlength="8" maxlength="128" placeholder="再次输入密码"></label><p class="small-note">用户名只能注册一次，不区分大小写和首尾空格。注册后可以用用户名或账号 ID 登录。</p>' : ''}<p id="login-error" class="form-error" role="alert" hidden></p><button class="button primary" type="submit">${register ? '注册并登录' : '打开菜谱本'}</button></form>${!register ? '<button class="text-button recovery-back" data-action="auth-recovery">忘记密码？</button>' : ''}<p class="small-note">保持登录 90 天。普通账号默认仅可查看菜谱，编辑需要管理员授权；收藏各自独立。</p></section></div>`;
+  (register ? $('#register-name') : $('#login-username')).focus();
+}
+
+function showRecoveryRequest() {
+  recoveryRequestId = createId();
+  $('#app').inert = true; $('#modal-root').inert = true;
+  $('#auth-root').innerHTML = recoveryView.request();
+  $('#password-recovery-form [name="username"]').focus();
+}
+
+async function submitRecoveryRequest(form) {
+  if (authBusy || !form.reportValidity()) return;
+  const button = form.querySelector('button[type="submit"]'), error = $('#recovery-error');
+  authBusy = true; form.inert = true; button.disabled = true; button.textContent = '正在发送…'; error.hidden = true;
+  try {
+    const data = await db.requestPasswordRecovery({ ...Object.fromEntries(new FormData(form)), requestId: recoveryRequestId });
+    form.reset(); $('#auth-root').innerHTML = recoveryView.request(data.message);
+    $('#auth-root [data-action="auth-login"]').focus();
+  } catch (problem) {
+    error.textContent = errorText(problem); error.hidden = false;
+    form.inert = false; button.disabled = false; button.textContent = '发送找回申请';
+  } finally { authBusy = false; }
 }
 
 async function login(form) {
@@ -85,9 +108,8 @@ async function login(form) {
       await db.register($('#register-name').value.trim(), $('#access-password').value, registrationId);
       page = 'account';
     } else await db.login($('#login-username').value.trim(), $('#access-password').value);
-    try { localStorage.setItem('fengwei-last-account-id', db.user.id); } catch {}
-    permissionData = null; auditData = null; auditQuery = ''; auditResult = '';
-    if (['permissions', 'logs'].includes(page)) page = 'my';
+    permissionData = null; auditData = null; recoveryData = null; recoveryError = ''; auditQuery = ''; auditResult = '';
+    if (['permissions', 'logs', 'recovery'].includes(page)) page = 'my';
     channel?.postMessage({ type: 'account-changed', userId: db.user.id });
     await refresh();
     $('#access-password').value = ''; $('#auth-root').innerHTML = '';
@@ -160,8 +182,9 @@ async function ask(title, message, action, danger = false) {
 }
 
 async function closeModal() {
-  if (passwordBusy || editor?.saving || editor?.processingPhoto) return;
+  if (passwordBusy || recoveryBusy || editor?.saving || editor?.processingPhoto) return;
   passwordMutationId = null;
+  recoveryDecision = null;
   if (editor?.dirty && !await ask('还没保存这道菜', '关闭后，本次填写的内容会丢失。', '放弃修改')) return;
   await stopWakeLock();
   editor = null; detailId = null; cookStep = null; permissionDecision = null;
@@ -348,6 +371,49 @@ async function restoreVersion(index) {
   await db.put(recipe, { baseRevision, operation: 'restore' }); await changed(); showDetail(recipe.id); toast('历史版本已恢复到服务器');
 }
 
+async function loadRecoveries() {
+  if (db?.user?.role !== 'admin' || recoveryLoading) return;
+  const adminId = db.user.id;
+  recoveryError = ''; recoveryLoading = true;
+  if (['my', 'recovery'].includes(page)) render();
+  try {
+    const data = await db.passwordRecoveries();
+    if (db.user?.id === adminId && db.user?.role === 'admin') recoveryData = data;
+  } catch (error) { if (db.user?.id === adminId) recoveryError = errorText(error); }
+  finally { recoveryLoading = false; if (['my', 'recovery'].includes(page)) render(); }
+}
+
+function showRecoveryDecision(data) {
+  if (db.user?.role !== 'admin' || recoveryBusy || !['reset', 'reject'].includes(data.kind)) return;
+  const item = recoveryData?.requests.find(item => item.id === data.id && item.userId === data.user && item.status === 'pending');
+  if (!item) return;
+  recoveryDecision = { userId: item.userId, requestId: item.id, action: data.kind, mutationId: createId() };
+  showModal(recoveryView.decision(item, data.kind));
+}
+
+async function submitRecoveryDecision(form) {
+  if (recoveryBusy || !recoveryDecision || !form.reportValidity()) return;
+  const values = Object.fromEntries(new FormData(form)), decision = { ...recoveryDecision };
+  const button = form.querySelector('button[type="submit"]'), error = $('#recovery-decision-error');
+  error.hidden = true;
+  if (decision.action === 'reset' && values.newPassword !== values.confirmPassword) { error.textContent = '两次输入的新密码不一致。'; error.hidden = false; return; }
+  recoveryBusy = true; form.inert = true; button.disabled = true; button.textContent = '正在处理…';
+  try {
+    const item = await db.decidePasswordRecovery({ ...decision, ...values, identityVerified: values.identityVerified === 'on' });
+    form.reset(); recoveryBusy = false; await closeModal(); await loadRecoveries();
+    if (decision.action === 'reset' && db.user?.role === 'admin') {
+      showModal(recoveryView.completed(item, values.newPassword));
+      if (item.userId === db.user.id) channel?.postMessage({ type: 'credentials-changed', userId: db.user.id });
+    } else toast('已拒绝找回申请，账号密码保持原样。');
+  } catch (problem) {
+    if (problem.status === 401 || problem.code === 'ACCOUNT_CHANGED') { form.reset(); recoveryBusy = false; await closeModal(); }
+    if (error.isConnected) { error.textContent = errorText(problem); error.hidden = false; }
+  } finally {
+    recoveryBusy = false; form.inert = false; button.disabled = false;
+    button.textContent = decision.action === 'reset' ? '确认重置密码' : '确认拒绝申请';
+  }
+}
+
 async function loadPermissions() {
   permissionData = null; permissionError = ''; render();
   try { permissionData = await db.permissions(); }
@@ -440,6 +506,22 @@ async function handleAction(button) {
   switch (action) {
     case 'auth-login': if (!authBusy) showLogin(); break;
     case 'auth-register': if (!authBusy) showLogin('注册后自动登录，可以查看所有共享菜谱，并拥有自己的收藏夹。', 'register'); break;
+    case 'auth-recovery': if (!authBusy) showRecoveryRequest(); break;
+    case 'reload-recovery': await loadRecoveries(); break;
+    case 'recovery-decision': showRecoveryDecision(button.dataset); break;
+    case 'generate-recovery-password': {
+      const bytes = crypto.getRandomValues(new Uint8Array(20));
+      const alphabet = 'ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz23456789';
+      const password = Array.from(bytes, value => alphabet[value % alphabet.length]).join('');
+      $('#recovery-decision-form [name="newPassword"]').value = password;
+      $('#recovery-decision-form [name="confirmPassword"]').value = password;
+      toast('随机密码已生成并填写，重置成功后可复制。'); break;
+    }
+    case 'copy-recovery-password': {
+      const input = $('#recovery-result-password'); if (!input) break;
+      try { await navigator.clipboard.writeText(input.value); toast('新密码已复制，请线下告知用户。'); }
+      catch { input.focus(); input.select(); toast('新密码已选中，请使用复制菜单。'); } break;
+    }
     case 'change-password': showChangePassword(); break;
     case 'export-audit': await exportAudit(button.dataset.format); break;
     case 'copy-account':
@@ -448,7 +530,7 @@ async function handleAction(button) {
       break;
     case 'sync': button.disabled = true; try { await refresh(); toast(db.readOnly ? '服务器暂不可达，正在查看缓存。' : '已读取服务器上的最新菜谱'); } finally { if (button.isConnected) button.disabled = false; } break;
     case 'logout': {
-      permissionData = null; auditData = null; auditQuery = ''; auditResult = '';
+      permissionData = null; auditData = null; recoveryData = null; recoveryError = ''; auditQuery = ''; auditResult = '';
       const cleared = await db.logout(); recipes = []; pendingImport = null; historyItems = []; page = 'recipes'; legacyCount = 0;
       channel?.postMessage({ type: 'account-changed', userId: null }); render();
       showLogin(cleared ? '已退出登录，此设备的服务器缓存已清除。' : '已退出登录。手机缓存未能清理，可在浏览器设置中清除此网站数据。'); break;
@@ -461,6 +543,7 @@ async function handleAction(button) {
       page = button.dataset.page; query = ''; category = '全部'; pendingImport = null; render(); window.scrollTo(0, 0);
       if (page === 'permissions') await loadPermissions();
       if (page === 'logs') await loadLogs();
+      if (page === 'recovery' || (page === 'my' && db.user?.role === 'admin')) await loadRecoveries();
       break;
     case 'reload-permissions': await loadPermissions(); break;
     case 'permission-decision': showPermissionDecision(button.dataset); break;
@@ -518,6 +601,8 @@ document.addEventListener('change', async event => {
 });
 document.addEventListener('submit', event => {
   const form = event.target;
+  if (form.id === 'password-recovery-form') { event.preventDefault(); submitRecoveryRequest(form); return; }
+  if (form.id === 'recovery-decision-form') { event.preventDefault(); submitRecoveryDecision(form); return; }
   if (form.id === 'recipe-form') { event.preventDefault(); saveRecipe(); }
   else if (['login-form', 'register-form'].includes(form.id)) { event.preventDefault(); login(form); }
   else if (form.id === 'password-change-form') { event.preventDefault(); submitPasswordChange(form); }
@@ -543,9 +628,11 @@ window.addEventListener('online', () => { toast('网络已连接，请同步服�
 window.addEventListener('offline', () => toast('已离线，已同步的菜谱仍可查看；修改需要联网保存。'));
 window.addEventListener('fengwei:permissions-changed', () => { permissionData = null; render(); });
 window.addEventListener('fengwei:login-required', async () => {
+  const recoveryForm = $('#recovery-decision-form');
+  if (recoveryForm || $('#recovery-result-password')) { recoveryForm?.reset(); recoveryBusy = false; await closeModal(); }
   const passwordForm = $('#password-change-form');
   if (passwordForm) { passwordForm.reset(); passwordBusy = false; await closeModal(); }
-  permissionData = null; auditData = null;
+  permissionData = null; auditData = null; recoveryData = null; recoveryError = '';
   recipes = []; pendingImport = null; historyItems = []; render();
   showLogin(editor ? '登录已失效，请使用当前密码重新登录。正在编辑的内容会保留。' : '登录已失效，请使用当前密码重新登录。');
 });
@@ -557,9 +644,11 @@ channel?.addEventListener('message', async event => {
       toast('密码已在另一个页面更新，此设备仍保持登录。'); return;
     }
     if (event.data?.type === 'account-changed' && event.data.userId !== db.user?.id) {
+      const recoveryForm = $('#recovery-decision-form');
+      if (recoveryForm || $('#recovery-result-password')) { recoveryForm?.reset(); recoveryBusy = false; await closeModal(); }
       const passwordForm = $('#password-change-form');
       if (passwordForm) { passwordForm.reset(); passwordBusy = false; await closeModal(); }
-      permissionData = null; auditData = null;
+      permissionData = null; auditData = null; recoveryData = null; recoveryError = '';
       await db.forget(false); recipes = []; pendingImport = null; historyItems = []; render();
       if (!event.data.userId) { showLogin('账号已在其他页面退出，请重新登录。'); return; }
       await refresh();
@@ -577,6 +666,10 @@ document.addEventListener('visibilitychange', async () => {
   }
   if (document.visibilityState === 'visible' && cookStep !== null && navigator.wakeLock) { try { wakeLock = await navigator.wakeLock.request('screen'); } catch {} }
 });
+
+setInterval(() => {
+  if (document.visibilityState === 'visible' && navigator.onLine !== false && db?.user?.role === 'admin' && !db.readOnly && ['my', 'recovery'].includes(page) && !recoveryBusy && !$('#modal-root').hasChildNodes()) loadRecoveries();
+}, 30000);
 
 async function init() {
   if (location.protocol !== 'https:' && !['localhost', '127.0.0.1', '[::1]'].includes(location.hostname)) {

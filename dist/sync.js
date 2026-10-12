@@ -155,6 +155,12 @@ export async function createRemoteStore(local) {
       const data = await request('register', { method: 'POST', value: { displayName, password, registrationId } });
       await acceptUser(data.user); offline = false; authenticated = true;
     },
+    async requestPasswordRecovery(value) { ensureOnline(); return request('account/recovery', { method: 'POST', value }); },
+    async passwordRecoveries() { ensureOnline(); const data = await request('admin/password-recovery'); await sameAccount(data); return data; },
+    async decidePasswordRecovery(value) {
+      ensureOnline(); const data = await request('admin/password-recovery/decision', { method: 'POST', value: { ...value, expectedUserId: user?.id } });
+      await sameAccount(data); if (data.user) { await acceptUser(data.user); await persist(); } return data.item;
+    },
     async logout() {
       ensureOnline(); await request('logout', { method: 'POST', value: {} });
       return forget();

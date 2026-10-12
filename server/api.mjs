@@ -6,6 +6,7 @@ import { publicUser, requireUniqueWrites } from './accounts.mjs';
 import { Favorites } from './favorites.mjs';
 import { AuditLog } from './audit.mjs';
 import { makeAuditExport } from './audit-export.mjs';
+import { PasswordRecovery, RECOVERY_MESSAGE } from './password-recovery.mjs';
 
 const failures = new Map();
 const registrations = new Map();
@@ -27,6 +28,7 @@ export function createApi({ database, password }) {
   const favorites = new Favorites(database.store, auth.accounts.legacyId);
   const audit = new AuditLog(database.store), permissions = auth.permissions;
   const passwordFailures = new Map();
+  const recovery = new PasswordRecovery(auth.accounts, permissions.adminId), recoveryAttempts = new Map();
   return async request => {
     let renewedCookie, actor, action, target = '', operationId;
     const receipt = () => audit.entry(actor, action, { target, operationId });
@@ -87,6 +89,18 @@ export function createApi({ database, password }) {
         await record('success');
         return reply({ ok: true, user: actor }, 201, { 'Set-Cookie': sessionCookie(request, await auth.issue(user)) });
       }
+      if (route === 'account/recovery' && method === 'POST') {
+        action = 'account.recovery.request'; target = '密码找回申请';
+        const address = request.headers.get('cf-connecting-ip') || request.headers.get('x-real-ip') || request.headers.get('x-forwarded-for')?.split(',')[0] || 'unknown';
+        const key = hash(address), previous = recoveryAttempts.get(key);
+        const attempt = previous?.expires > Date.now() ? previous : { count: 0, expires: Date.now() + 900000 };
+        if (attempt.count >= 5) fail(429, 'RECOVERY_TRY_LATER', '找回申请次数较多，请 15 分钟后再试。');
+        attempt.count++; recoveryAttempts.set(key, attempt);
+        if (recoveryAttempts.size > 2000) for (const [id, entry] of recoveryAttempts) if (entry.expires < Date.now()) recoveryAttempts.delete(id);
+        const data = await body(request, 4096); operationId = data?.requestId;
+        await recovery.request(data, receipt()); await record('success');
+        return reply({ ok: true, message: RECOVERY_MESSAGE });
+      }
       const session = await auth.verify(request);
       if (!session) fail(401, 'LOGIN_REQUIRED', '请先输入账号和密码，打开你的私人菜谱本。');
       if (session.renew) renewedCookie = sessionCookie(request, await auth.issue(session.account));
@@ -97,6 +111,25 @@ export function createApi({ database, password }) {
         return reply({ ok: true }, 200, { 'Set-Cookie': sessionCookie(request, '', 0) });
       }
       if (route === 'me' && method === 'GET') return reply({ user });
+      if (route === 'admin/password-recovery' && method === 'GET') {
+        if (user.role !== 'admin') fail(403, 'ADMIN_REQUIRED', '只有管理员可以查看密码找回申请。');
+        return reply({ userId: user.id, requests: await recovery.requests() });
+      }
+      if (route === 'admin/password-recovery/decision' && method === 'POST') {
+        if (user.role !== 'admin') fail(403, 'ADMIN_REQUIRED', '只有管理员可以处理密码找回申请。');
+        const data = await body(request, 4096);
+        if (data?.expectedUserId && data.expectedUserId !== user.id) fail(409, 'ACCOUNT_CHANGED', '账号已在其他页面切换，请重新登录后操作。');
+        action = data?.action === 'reject' ? 'account.recovery.reject' : 'account.recovery.reset';
+        operationId = data?.mutationId;
+        target = typeof data?.userId === 'string' ? data.userId : '';
+        const item = await recovery.decide(user, data, receipt()); target = item.displayName;
+        await record('success');
+        if (item.userId === user.id && item.status === 'reset') {
+          const account = await auth.accounts.get(user.id);
+          return reply({ userId: user.id, user: publicUser(await permissions.profile(account)), item }, 200, { 'Set-Cookie': sessionCookie(request, await auth.issue(account)) });
+        }
+        return reply({ userId: user.id, item });
+      }
       if (route === 'account/password' && method === 'POST') {
         action = 'account.password'; target = '本人账号';
         const previous = passwordFailures.get(user.id);

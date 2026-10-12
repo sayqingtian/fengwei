@@ -66,6 +66,28 @@ function fixture() {
 }
 const cookieOf = response => response.headers.get('set-cookie')?.split(';')[0];
 
+test('password recovery uses the existing PostgreSQL table and concurrent admin decisions cannot overwrite credentials', async () => {
+  const f = fixture(), first = f.api(), second = f.api();
+  const admin = await f.call(first, 'login', 'POST', { username: 'wupanfeng', password: fixturePassword });
+  const adminCookie = cookieOf(admin);
+  const registered = await f.call(first, 'register', 'POST', { displayName: 'SQL密码找回', password: fixturePassword, registrationId: randomUUID() });
+  const oldCookie = cookieOf(registered), user = (await registered.json()).user, requestId = randomUUID();
+  assert.equal((await f.call(first, 'account/recovery', 'POST', { username: user.id, contact: '测试线下渠道', requestId })).status, 200);
+  const data = await (await f.call(second, 'admin/password-recovery', 'GET', undefined, adminCookie)).json();
+  assert.equal(data.requests[0].userId, user.id); assert.equal(data.requests[0].status, 'pending');
+  const passwords = ['sql-recovery-first-password', 'sql-recovery-second-password'];
+  const responses = await Promise.all([first, second].map((api, i) => f.call(api, 'admin/password-recovery/decision', 'POST', { userId: user.id, requestId, action: 'reset', identityVerified: true, newPassword: passwords[i], confirmPassword: passwords[i], mutationId: randomUUID() }, adminCookie)));
+  assert.deepEqual(responses.map(response => response.status).sort(), [200, 409]);
+  const winner = responses.findIndex(response => response.status === 200);
+  const restarted = f.api();
+  assert.equal((await f.call(restarted, 'login', 'POST', { username: user.id, password: passwords[winner] })).status, 200);
+  assert.equal((await f.call(restarted, 'login', 'POST', { username: user.id, password: fixturePassword })).status, 401);
+  assert.equal((await f.call(restarted, 'me', 'GET', undefined, oldCookie)).status, 401);
+  assert.ok([...f.source.records.keys()].every(key => !key.startsWith('private/password-recovery-')));
+  const { rows } = await pg.query('select key, value from fengwei_account_records where namespace=$1 and key like $2', [f.namespace, 'private/password-recovery-%']);
+  assert.equal(rows.length, 3); assert.ok(!JSON.stringify(rows).includes(passwords[winner]));
+});
+
 test('PostgreSQL primary keys select one reservation winner while Blob stores recipes unchanged', async () => {
   const f = fixture(), first = f.store(), second = f.store(), key = 'private/usernames/claim.json';
   const writes = await Promise.allSettled([first.setJSON(key, { id: 'first' }, { onlyIfNew: true }), second.setJSON(key, { id: 'second' }, { onlyIfNew: true })]);

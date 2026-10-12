@@ -36,6 +36,13 @@ async function logIn(page, identifier, secret) {
   await page.getByRole('button', { name: '查看 共享番茄炒蛋' }).waitFor();
 }
 try {
+  await newcomer.goto('http://localhost:4181');
+  await newcomer.getByLabel('账号', { exact: true }).waitFor();
+  assert.equal(await newcomer.getByLabel('账号', { exact: true }).inputValue(), '');
+  await newcomer.evaluate(() => localStorage.setItem('fengwei-last-account-id', 'wupanfeng'));
+  await newcomer.reload(); await newcomer.getByLabel('账号', { exact: true }).waitFor();
+  assert.equal(await newcomer.getByLabel('账号', { exact: true }).inputValue(), '', 'previous login must not prefill the account');
+  assert.equal(await newcomer.getByLabel('密码', { exact: true }).inputValue(), '');
   await logIn(owner, 'wupanfeng', password);
   await owner.getByRole('button', { name: '取消收藏 共享番茄炒蛋', exact: true }).waitFor();
   await newcomer.goto('http://localhost:4181');
@@ -114,9 +121,41 @@ try {
   await owner.getByRole('button', { name: '打开菜谱本' }).click();
   await sibling.getByRole('button', { name: '收藏 共享番茄炒蛋', exact: true }).waitFor();
   assert.equal(await sibling.locator('#auth-root form').count(), 0, 'same-browser account switch must update the other tab');
+  await newcomer.getByRole('button', { name: '退出', exact: true }).click();
+  await newcomer.getByRole('button', { name: '忘记密码？', exact: true }).click();
+  await newcomer.getByLabel('账号', { exact: true }).fill(accountId);
+  await newcomer.getByLabel('线下联系方式', { exact: true }).fill('浏览器测试线下渠道');
+  await newcomer.getByLabel('备注（选填）', { exact: true }).fill('希望管理员帮助重置密码');
+  await newcomer.screenshot({ path: resolve(output, 'mobile-password-recovery.png'), fullPage: true });
+  await newcomer.getByRole('button', { name: '发送找回申请', exact: true }).click();
+  await newcomer.getByRole('heading', { name: '申请已受理', exact: true }).waitFor();
+  await nav(owner).getByRole('button', { name: '我的', exact: true }).click();
+  await owner.getByRole('button', { name: /密码找回.*1 条待处理/ }).waitFor();
+  await owner.getByRole('button', { name: /密码找回/ }).click();
+  await owner.getByRole('button', { name: '重置密码', exact: true }).click();
+  await owner.getByRole('button', { name: '生成随机密码', exact: true }).click();
+  const recoveredPassword = await owner.getByLabel('新密码', { exact: true }).inputValue();
+  assert.ok(recoveredPassword.length >= 16);
+  await owner.getByRole('checkbox', { name: '我已通过已有的线下联系渠道核实账号主人身份', exact: true }).check();
+  await owner.getByRole('button', { name: '确认重置密码', exact: true }).click();
+  await owner.getByRole('heading', { name: '密码已重置', exact: true }).waitFor();
+  assert.equal(await owner.locator('#recovery-result-password').inputValue(), recoveredPassword);
+  assert.equal(await owner.evaluate(() => document.documentElement.scrollWidth <= innerWidth), true);
+  await owner.screenshot({ path: resolve(output, 'mobile-admin-password-reset.png'), fullPage: true });
+  await owner.getByRole('button', { name: '关闭重置结果', exact: true }).click();
+  assert.equal(await owner.locator('#recovery-result-password').count(), 0);
+  await newcomer.getByRole('button', { name: '返回登录', exact: true }).click();
+  assert.equal(await newcomer.getByLabel('账号', { exact: true }).inputValue(), '');
+  await newcomer.getByLabel('账号', { exact: true }).fill(accountId);
+  await newcomer.getByLabel('密码', { exact: true }).fill(recoveredPassword);
+  await newcomer.getByRole('button', { name: '打开菜谱本', exact: true }).click();
+  await nav(newcomer).getByRole('button', { name: '我的', exact: true }).click();
+  await newcomer.getByRole('button', { name: /我的账号/ }).click();
+  await newcomer.getByLabel('账号 ID', { exact: true }).waitFor();
+  assert.equal(await newcomer.getByLabel('账号 ID', { exact: true }).inputValue(), accountId);
   assert.deepEqual(errors, []);
   await writeFile(resolve(output, 'account-verification.json'), JSON.stringify({ passed: true, registration: true, sharedEditing: true, independentFavorites: true, crossDevice: true, accountSwitch: true, legacyFavorites: true, offline: true }, null, 2));
-  console.log('Multi-account browser checks passed.');
+  console.log('Multi-account, empty login, and administrator password recovery browser checks passed.');
 } finally {
   await browser.close(); await new Promise(resolve => { child.once('exit', resolve); child.kill(); });
 }
