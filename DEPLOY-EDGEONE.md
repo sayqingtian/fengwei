@@ -19,7 +19,7 @@
 
 部署后先从控制台复制默认访问地址进行检查。若使用默认域名或其他自定义域名，在该部署环境将 `PUBLIC_ORIGIN` 设置为实际的完整 HTTPS 网站入口，例如 `https://your-project.edgeone.app`；使用 `https://www.wupanfeng.dpdns.org` 时可以沿用代码默认值。修改环境变量后重新部署。
 
-访问 `/api/health` 可检查注册存储能力。HTTP 200 且返回 `{"ok":true,"registration":true}` 表示禁止覆盖条件已验证；检查不创建账号，也不返回存储凭据。HTTP 503 的 `code` 为安全的故障类别，可结合函数日志排查。此检查同样用于注册及修改密码，不支持条件写入时不会跳过保护。
+访问 `/api/health` 可检查注册存储能力。HTTP 200 且返回 `{"ok":true,"registration":true}` 表示 APPEND 起点条件已验证；检查不创建账号，也不返回存储凭据。HTTP 503 的 `code` 为安全的故障类别，可结合函数日志排查。此检查同样用于注册及修改密码，不支持条件写入时不会跳过保护。
 
 自定义域名需在新项目的域名管理中绑定，DNS CNAME 必须使用新项目控制台显示的值。首页和 `/api/me` 都返回 EdgeOne 的 `404 NOT_FOUND` / “The site does not exist” 时，先检查生产部署是否成功以及域名绑定；这类响应不是注册接口返回的错误。首页正常、API 返回 404 时，检查是否误将输出目录设为只有前端的 `dist`。
 
@@ -75,7 +75,7 @@
 
 菜谱与照片使用同源登录 API，接口响应禁止缓存。照片按内容摘要复用，每次共享菜谱保存和删除都保留独立版本。过期编辑会报冲突，草稿保留；真正同时编辑时双方版本保留，可通过历史恢复。
 
-Blob SDK 0.0.18 的网关没有可靠的 onlyIfNew 原子写保证。云端账号适配器使用同一 SDK 的临时凭据，直接向 COS 发送签名的 x-cos-forbid-overwrite 请求；普通菜谱、照片和收藏仍通过 Blob SDK 访问同一命名空间。注册与修改密码在运行时验证底层条件写入，不支持时停止操作。注册请求使用随机请求编号，网络丢失后重试同一请求会返回相同账号，用户名仍唯一。收藏使用独立不可变事件，同一个账号的同时修改按事件顺序选择当前状态。
+Blob SDK 0.0.18 的网关没有可靠的 onlyIfNew 原子写保证，COS 的 x-cos-forbid-overwrite 在版本化存储桶中也不生效。云端账号适配器使用同一 SDK 的临时凭据，向 COS 发送签名的 APPEND 请求并始终指定 position=0。非空记录只允许初次创建，重复起点写入和对已有 normal 对象的写入都会被拒绝；普通菜谱、照片和收藏仍通过 Blob SDK 访问同一命名空间。注册与修改密码在运行时验证底层条件写入，APPEND 权限或起点校验不支持时停止操作。注册请求使用随机请求编号，网络丢失后重试同一请求会返回相同账号，用户名仍唯一。收藏使用独立不可变事件，同一个账号的同时修改按事件顺序选择当前状态。
 
 账户免费存储额度以控制台为准。历史版本和照片目前不会自动清理，建议定期导出备份。部署包不包含本地数据库、密码明文、个人备份或测试数据。
 
@@ -92,3 +92,4 @@ npm run dev 默认只监听 localhost:4173。本地文件数据库位于 .data/f
 - [直接上传](https://pages.edgeone.ai/document/direct-upload)
 - [Node.js 云函数](https://pages.edgeone.ai/document/node-functions)
 - [Blob 存储](https://pages.edgeone.ai/document/blob-storage)
+- [COS APPEND Object](https://cloud.tencent.com/document/product/436/7741)

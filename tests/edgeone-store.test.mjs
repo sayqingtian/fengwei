@@ -1,8 +1,8 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { getStore } from '@edgeone/pages-blob';
-import { withAtomicWrites } from '../server/edgeone-store.mjs';
+import { signCosRequest, withAtomicWrites } from '../server/edgeone-store.mjs';
 import { RecipeDatabase } from '../server/database.mjs';
 import { createApi } from '../server/api.mjs';
 
@@ -10,7 +10,7 @@ const password = 'edgeone-store-fixture-password';
 const credential = { secretId: 'fixture-secret-id', secretKey: 'fixture-secret-key', sessionToken: 'fixture-session-token' };
 const prefix = '1250000000/fixture-project/fengwei-recipes/';
 function fixture({ enforceCondition = true, beforeWrite } = {}) {
-  const objects = new Map();
+  const objects = new Map(), appendable = new Set();
   let ordinaryWrites = 0;
   const sdk = () => ({
     storeName: 'fengwei-recipes',
@@ -22,21 +22,23 @@ function fixture({ enforceCondition = true, beforeWrite } = {}) {
     async get(key, options = {}) { const value = objects.get(key); return value === undefined ? null : options.type === 'json' ? JSON.parse(value) : value; },
     async list({ prefix = '' } = {}) { return { blobs: [...objects.keys()].filter(key => key.startsWith(prefix)).map(key => ({ key })) }; },
     // The gateway deliberately ignores onlyIfNew, reproducing Blob 0.0.18.
-    async set(key, value) { ordinaryWrites++; objects.set(key, value); },
-    async setJSON(key, value) { ordinaryWrites++; objects.set(key, JSON.stringify(value)); },
+    async set(key, value) { ordinaryWrites++; appendable.delete(key); objects.set(key, value); },
+    async setJSON(key, value) { ordinaryWrites++; appendable.delete(key); objects.set(key, JSON.stringify(value)); },
   });
   const nativeFetch = async (url, options) => {
     const target = new URL(url), headers = new Headers(options.headers);
     assert.equal(target.host, 'fixture-bucket-1250000000.cos.ap-singapore.myqcloud.com');
-    assert.equal(options.method, 'PUT');
-    assert.equal(headers.get('x-cos-forbid-overwrite'), 'true');
+    assert.equal(options.method, 'POST');
+    assert.ok(target.searchParams.has('append')); assert.equal(target.searchParams.get('position'), '0');
+    assert.equal(headers.get('content-length'), String(options.body.length));
+    assert.equal(headers.get('content-md5'), createHash('md5').update(options.body).digest('base64'));
     assert.equal(headers.get('x-cos-security-token'), credential.sessionToken);
-    assert.match(headers.get('authorization'), /q-header-list=[^&]*x-cos-forbid-overwrite/);
+    assert.match(headers.get('authorization'), /q-url-param-list=append;position/);
     const fullKey = decodeURIComponent(target.pathname.slice(1)); assert.ok(fullKey.startsWith(prefix));
     const key = fullKey.slice(prefix.length);
     await beforeWrite?.(key);
-    if (enforceCondition && objects.has(key)) return new Response('<Error><Code>FileAlreadyExists</Code></Error>', { status: 409 });
-    objects.set(key, options.body);
+    if (enforceCondition && objects.has(key)) return new Response(`<Error><Code>${appendable.has(key) ? 'PositionNotEqualToLength' : 'ObjectNotAppendable'}</Code></Error>`, { status: 409 });
+    objects.set(key, options.body.toString('utf8')); appendable.add(key);
     return new Response('', { status: 200 });
   };
   const store = () => withAtomicWrites(sdk(), { fetch: nativeFetch });
@@ -49,7 +51,7 @@ function fixture({ enforceCondition = true, beforeWrite } = {}) {
 }
 const cookieOf = response => response.headers.get('set-cookie')?.split(';')[0];
 
-test('direct COS signing matches the actual pinned Blob SDK using temporary credentials and UTF-8 keys', async t => {
+test('COS signing matches the pinned Blob SDK for UTF-8 PUT keys and authenticated LIST query parameters', async t => {
   const now = 1700000000000;
   t.mock.method(Date, 'now', () => now);
   let gatewayRequest;
@@ -61,22 +63,18 @@ test('direct COS signing matches the actual pinned Blob SDK using temporary cred
       cosOverseas: { bucket: 'fixture-bucket-1250000000', region: 'ap-singapore' },
     });
     gatewayRequest = { url, options };
-    return new Response('', { status: 200 });
+    return new Response(options.method === 'GET' ? '<ListBucketResult><IsTruncated>false</IsTruncated></ListBucketResult>' : '', { status: 200 });
   });
   const sdk = getStore({ name: 'fengwei-recipes', projectId: 'fixture-project', token: 'fixture-api-token', consistency: 'strong' });
   const key = 'private/测试(厨房)/claim.json', value = { marker: 'protected' }, options = { onlyIfNew: true, cacheControl: 'no-store' };
   await sdk.setJSON(key, value, options);
-  let directRequest;
-  const atomic = withAtomicWrites(sdk, { fetch: async (url, request) => {
-    directRequest = { url, request };
-    return new Response('', { status: 200 });
-  } });
-  await atomic.setJSON(key, value, options);
-  assert.equal(new URL(directRequest.url).hostname, 'fixture-bucket-1250000000.cos.ap-singapore.myqcloud.com');
-  assert.equal(new Headers(directRequest.request.headers).get('authorization'), new Headers(gatewayRequest.options.headers).get('authorization'));
-  assert.equal(new Headers(directRequest.request.headers).get('x-cos-security-token'), credential.sessionToken);
-  assert.equal(directRequest.request.body, gatewayRequest.options.body);
-  assert.equal(new URL(directRequest.url).pathname, new URL(gatewayRequest.url).pathname);
+  const checkSignature = () => {
+    const target = new URL(gatewayRequest.url), headers = Object.fromEntries(new Headers(gatewayRequest.options.headers));
+    assert.equal(signCosRequest(gatewayRequest.options.method, decodeURIComponent(target.pathname.slice(1)), headers, credential, Object.fromEntries(target.searchParams)), headers.authorization);
+  };
+  checkSignature();
+  await sdk.list({ prefix: 'private/测试(厨房)/', consistency: 'strong' });
+  checkSignature();
 });
 
 test('conditional writes bypass the overwrite-prone gateway, preserve existing records, and keep normal Blob writes', async () => {
@@ -88,6 +86,9 @@ test('conditional writes bypass the overwrite-prone gateway, preserve existing r
   await store.setJSON('recipes/example.json', { title: '菜谱' });
   assert.deepEqual(await store.get('recipes/example.json', { type: 'json' }), { title: '菜谱' });
   assert.equal(f.ordinaryWrites(), 1);
+  await assert.rejects(store.setJSON('recipes/example.json', { title: '覆盖旧记录' }, { onlyIfNew: true }), { code: 'PRECONDITION_FAILED' });
+  assert.deepEqual(await store.get('recipes/example.json', { type: 'json' }), { title: '菜谱' });
+  await assert.rejects(store.set('private/empty', '', { onlyIfNew: true }), { code: 'INVALID_VALUE' });
   await assert.rejects(store.setJSON('../escape.json', {}, { onlyIfNew: true }), { code: 'INVALID_KEY' });
 });
 

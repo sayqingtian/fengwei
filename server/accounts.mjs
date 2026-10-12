@@ -7,7 +7,9 @@ const problem = (status, code, message) => Object.assign(new Error(message), { s
 const uniqueWriteChecks = new WeakMap();
 export async function requireUniqueWrites(store) {
   if (!uniqueWriteChecks.has(store)) uniqueWriteChecks.set(store, (async () => {
-    const key = 'private/registration-storage-check.json';
+    // Separate the APPEND capability check from the old normal PUT probe.
+    // This ensures the cloud provider has actually created an appendable record.
+    const key = 'private/registration-storage-check-v2.json';
     try { await store.setJSON(key, { marker: 'protected' }, { onlyIfNew: true, cacheControl: 'no-store' }); }
     catch (error) { if (error.code !== 'PRECONDITION_FAILED') throw error; }
     try { await store.setJSON(key, { marker: 'conditional-write-unsupported' }, { onlyIfNew: true, cacheControl: 'no-store' }); }

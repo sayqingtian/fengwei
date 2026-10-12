@@ -81,7 +81,7 @@ npm run build
 - server/accounts.mjs：唯一账号 ID、昵称与密码哈希。
 - server/favorites.mjs：独立收藏与原账号收藏迁移。
 - server/edgeone.mjs：EdgeOne Blob 云端适配。
-- server/edgeone-store.mjs：账号条件写入适配，使用同一 Blob 存储的临时凭据向 COS 发起禁止覆盖的签名请求。
+- server/edgeone-store.mjs：账号条件写入适配，使用同一 Blob 存储的临时凭据向 COS 发起固定起点的 APPEND 请求。
 - server/file-store.mjs：本地持久化适配。
 - scripts/build-edgeone.mjs：编译云函数与 SDK、生成上传目录。
 - DEPLOY-EDGEONE.md：生产环境设置、部署与迁移说明。
@@ -94,7 +94,7 @@ npm run build
 
 - 管理员身份绑定原 wupanfeng 账号的固定 ID，普通账号不能通过同名或传入 role/canEdit 字段提升权限。
 - 新注册及已有普通账号默认只有共享菜谱查看权限，个人收藏仍独立保存。编辑申请需填写 5～500 字原因；管理员批准或拒绝时可写备注，获批后可撤销。每次接口请求读取当前权限，旧 Cookie 不会保留已撤销的编辑权。
-- 用户名原子占用使用存储的 onlyIfNew 条件写入；失败时不会退回“先读后写”的防重方式。本地 FileStore 使用原子文件链接。Blob SDK 0.0.18 的网关不保证 onlyIfNew，云端账号适配器使用 SDK 获取的临时凭据，直接向同一 COS 存储发送签名的 x-cos-forbid-overwrite 请求。普通菜谱读写仍使用 Blob SDK，存储路径和已有数据不变。此适配器依赖固定的 SDK 0.0.18 内部客户端接口，升级 SDK 时须运行适配测试。部署后可访问 /api/health 检查注册能力，不创建测试账号、不返回私有数据；若底层存储仍忽略禁止覆盖条件，检查失败并停止注册和密码修改。
+- 用户名原子占用使用存储的 onlyIfNew 条件写入；失败时不会退回“先读后写”的防重方式。本地 FileStore 使用原子文件链接。Blob SDK 0.0.18 的网关不保证 onlyIfNew，版本化 COS 存储也不执行 x-cos-forbid-overwrite。云端账号适配器使用 SDK 获取的临时凭据，向同一 COS 存储发送签名的 APPEND 请求，始终指定 position=0 并写入非空 JSON；相同对象只允许第一次写入，之后因起点不等于长度而被原子拒绝，已有 normal 对象也不会被覆盖。普通菜谱读写仍使用 Blob SDK，存储路径和已有数据不变。此适配器依赖固定的 SDK 0.0.18 内部客户端接口，升级 SDK 时须运行适配测试。部署后可访问 /api/health 检查注册能力，不创建测试账号、不返回私有数据；若底层存储不允许 APPEND 或不执行起点校验，检查失败并停止注册和密码修改。
 - 原注册请求重试保持同一个账号 ID。历史重名账号保留各自 ID 和数据，新注册不能再占用这些名字；历史重名账号用 ID 登录。
 - 日志索引保存在 private/audit/，菜谱修改和授权行为还会随对应持久化记录保存操作凭据，索引写入故障不会让已保存的菜谱报保存失败。权限与申请保存在 private/permissions/、private/permission-requests/；这些数据不会作为菜谱 JSON 备份导出。只有管理员能读取账号列表和日志；日志支持搜索、结果筛选和每页 50 条的加载。
 - 服务端记录注册、登录、退出、同步、收藏、菜谱新增/修改/删除/导入/恢复与授权行为，以及失败或被权限拦截的写入。查看菜谱、跟着做与导出备份由在线页面上报；离线浏览不记录。日志不会写入密码、密码哈希或 Cookie。
