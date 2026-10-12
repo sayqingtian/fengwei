@@ -4,6 +4,8 @@ import { createAuth, testAccount, sessionCookie } from './auth.mjs';
 import { readJsonBody as body } from './json-body.mjs';
 import { publicUser } from './accounts.mjs';
 import { Favorites } from './favorites.mjs';
+import { AuditLog } from './audit.mjs';
+import { makeAuditExport } from './audit-export.mjs';
 
 const failures = new Map();
 const registrations = new Map();
@@ -23,8 +25,15 @@ function mutation(data) {
 export function createApi({ database, password }) {
   const auth = password === undefined ? createAuth(database?.store) : createAuth(database?.store, testAccount(password));
   const favorites = new Favorites(database.store, auth.accounts.legacyId);
+  const audit = new AuditLog(database.store), permissions = auth.permissions;
+  const passwordFailures = new Map();
   return async request => {
-    let renewedCookie;
+    let renewedCookie, actor, action, target = '', operationId;
+    const receipt = () => audit.entry(actor, action, { target, operationId });
+    const record = async result => {
+      try { await audit.record(actor, action, { target, operationId, result }); }
+      catch (error) { console.error('Fengwei audit index unavailable:', error.code || error.name); }
+    };
     const reply = (value, status = 200, headers = {}) => json(value, status, { ...(renewedCookie ? { 'Set-Cookie': renewedCookie } : {}), ...headers });
     try {
       if (!auth.configured) fail(503, 'NOT_CONFIGURED', '服务器账号尚未完成配置，请重新部署完整的峰味上传包。');
@@ -33,7 +42,9 @@ export function createApi({ database, password }) {
       if (!['GET', 'POST', 'PUT', 'DELETE'].includes(method)) fail(405, 'METHOD_NOT_ALLOWED', '不支持的请求方式。');
       if (method !== 'GET') writableOrigin(request);
       if (route === 'login' && method === 'POST') {
+        action = 'account.login';
         const data = await body(request, 4096);
+        actor = { displayName: typeof data?.username === 'string' ? data.username.trim().slice(0, 64) : '未登录用户' };
         const address = request.headers.get('cf-connecting-ip') || request.headers.get('x-real-ip') || request.headers.get('x-forwarded-for')?.split(',')[0] || 'unknown';
         const key = hash(address), attempt = failures.get(key);
         if (attempt && attempt.expires > Date.now() && attempt.count >= 10) fail(429, 'TRY_LATER', '尝试次数较多，请 5 分钟后再试。');
@@ -44,12 +55,16 @@ export function createApi({ database, password }) {
           fail(401, 'BAD_CREDENTIALS', '账号或密码不正确。');
         }
         failures.delete(key);
+        actor = publicUser(await permissions.profile(user));
         // Verify durable storage before claiming that login/server setup works.
         await database.headKeys();
-        return reply({ ok: true, user: publicUser(user) }, 200, { 'Set-Cookie': sessionCookie(request, await auth.issue(user)) });
+        await record('success');
+        return reply({ ok: true, user: actor }, 200, { 'Set-Cookie': sessionCookie(request, await auth.issue(user)) });
       }
       if (route === 'register' && method === 'POST') {
+        action = 'account.register';
         const data = await body(request, 4096);
+        actor = { displayName: typeof data?.displayName === 'string' ? data.displayName.trim().slice(0, 30) : '未登录用户' };
         const address = request.headers.get('cf-connecting-ip') || request.headers.get('x-real-ip') || request.headers.get('x-forwarded-for')?.split(',')[0] || 'unknown';
         const key = hash(address), previous = registrations.get(key);
         const attempt = previous?.expires > Date.now() ? previous : { count: 0, expires: Date.now() + 3600000 };
@@ -57,19 +72,93 @@ export function createApi({ database, password }) {
         attempt.count++; registrations.set(key, attempt);
         if (registrations.size > 2000) for (const [key, item] of registrations) if (item.expires < Date.now()) registrations.delete(key);
         const user = await auth.accounts.register(data);
-        return reply({ ok: true, user: publicUser(user) }, 201, { 'Set-Cookie': sessionCookie(request, await auth.issue(user)) });
+        actor = publicUser(await permissions.profile(user)); operationId = data.registrationId;
+        await record('success');
+        return reply({ ok: true, user: actor }, 201, { 'Set-Cookie': sessionCookie(request, await auth.issue(user)) });
       }
-      if (route === 'logout' && method === 'POST') return reply({ ok: true }, 200, { 'Set-Cookie': sessionCookie(request, '', 0) });
       const session = await auth.verify(request);
       if (!session) fail(401, 'LOGIN_REQUIRED', '请先输入账号和密码，打开你的私人菜谱本。');
-      if (session.renew) renewedCookie = sessionCookie(request, await auth.issue(session.user));
+      if (session.renew) renewedCookie = sessionCookie(request, await auth.issue(session.account));
       const user = session.user;
+      actor = user;
+      if (route === 'logout' && method === 'POST') {
+        action = 'account.logout'; await record('success');
+        return reply({ ok: true }, 200, { 'Set-Cookie': sessionCookie(request, '', 0) });
+      }
       if (route === 'me' && method === 'GET') return reply({ user });
+      if (route === 'account/password' && method === 'POST') {
+        action = 'account.password'; target = '本人账号';
+        const previous = passwordFailures.get(user.id);
+        if (previous?.expires > Date.now() && previous.count >= 10) fail(429, 'PASSWORD_TRY_LATER', '当前密码尝试次数较多，请 5 分钟后再试。');
+        const data = await body(request, 4096); operationId = data?.mutationId;
+        let account;
+        try { account = await auth.accounts.changePassword(user.id, data, session.account.passwordVersion || 'initial', receipt()); }
+        catch (error) {
+          if (['CURRENT_PASSWORD_INCORRECT', 'PASSWORD_CHANGE_CONFLICT'].includes(error.code)) {
+            for (const [key, entry] of passwordFailures) if (entry.expires < Date.now()) passwordFailures.delete(key);
+            passwordFailures.set(user.id, { count: previous?.expires > Date.now() ? previous.count + 1 : 1, expires: Date.now() + 300000 });
+          }
+          throw error;
+        }
+        passwordFailures.delete(user.id); await record('success');
+        return reply({ ok: true, userId: user.id, user: publicUser(await permissions.profile(account)) }, 200, { 'Set-Cookie': sessionCookie(request, await auth.issue(account)) });
+      }
+      if (route === 'permissions' && method === 'GET') {
+        const admin = user.role === 'admin';
+        const requests = await permissions.requests(admin ? undefined : user.id);
+        const accounts = admin ? await Promise.all((await auth.accounts.list()).map(async item => publicUser(await permissions.profile(item)))) : undefined;
+        return reply({ userId: user.id, user, requests, ...(admin ? { accounts } : {}) });
+      }
+      if (route === 'permissions/request' && method === 'POST') {
+        action = 'permission.request';
+        const data = await body(request, 4096); operationId = data?.requestId;
+        target = typeof data?.reason === 'string' ? data.reason.trim() : '';
+        const item = await permissions.request(user, data, receipt());
+        await record('success'); return reply({ userId: user.id, item: { ...item, auditEntry: undefined } }, 201);
+      }
+      if (route === 'permissions/decision' && method === 'POST') {
+        if (user.role !== 'admin') fail(403, 'ADMIN_REQUIRED', '只有 wupanfeng 管理员可以处理授权。');
+        const data = await body(request, 4096);
+        const account = await auth.accounts.get(data?.userId);
+        if (!account) fail(404, 'ACCOUNT_NOT_FOUND', '账号不存在。');
+        action = `permission.${data.action}`; operationId = data.mutationId; target = account.displayName;
+        await permissions.decide(user, account, data, receipt());
+        await record('success');
+        return reply({ userId: user.id, account: publicUser(await permissions.profile(account)) });
+      }
+      if (['audit', 'audit/export'].includes(route) && method === 'GET') {
+        if (route === 'audit/export') { action = 'audit.export'; target = '操作日志'; }
+        if (user.role !== 'admin') fail(403, 'ADMIN_REQUIRED', '只有 wupanfeng 管理员可以查看操作日志。');
+        const cursor = url.searchParams.get('cursor') || '', query = url.searchParams.get('q') || '', result = url.searchParams.get('result') || '';
+        if (query.length > 100 || cursor.length > 100 || !['', 'success', 'denied', 'failed'].includes(result)) fail(400, 'INVALID_FILTER', '日志筛选条件不正确。');
+        if (route === 'audit/export') {
+          action = 'audit.export';
+          const format = url.searchParams.get('format') || 'csv';
+          if (!['csv', 'json'].includes(format)) fail(400, 'INVALID_EXPORT_FORMAT', '请选择 CSV 或 JSON 导出格式。');
+          const file = makeAuditExport(await audit.filtered({ query, result }), { format, query, result });
+          target = `${format.toUpperCase()} · 共 ${file.count} 条记录`; await record('success');
+          return new Response(file.content, { headers: { 'Content-Type': file.mimeType, 'Content-Disposition': `attachment; filename="fengwei-operation-logs.${format}"; filename*=UTF-8''${encodeURIComponent(file.filename)}`, 'Cache-Control': 'private, no-store, max-age=0', Vary: 'Cookie', 'X-Content-Type-Options': 'nosniff', 'X-Audit-Count': String(file.count), ...(renewedCookie ? { 'Set-Cookie': renewedCookie } : {}) } });
+        }
+        return reply({ userId: user.id, ...await audit.list({ cursor, query, result }) });
+      }
+      if (route === 'activity' && method === 'POST') {
+        const data = await body(request, 4096);
+        if (!['recipe.view', 'recipe.cook', 'backup.export'].includes(data?.action)) fail(400, 'INVALID_ACTIVITY', '操作类型不正确。');
+        action = data.action;
+        if (action.startsWith('recipe.')) {
+          if (typeof data.recipeId !== 'string' || !data.recipeId || data.recipeId.length > 128 || data.recipeId.includes('/')) fail(400, 'INVALID_ID', '菜谱编号不正确。');
+          const item = await database.latest(data.recipeId);
+          if (!item || item.deleted) fail(404, 'NOT_FOUND', '菜谱不存在。');
+          target = item.recipe.title;
+        } else target = '共享菜谱 JSON 备份';
+        await record('success'); return reply({ ok: true });
+      }
       if (route === 'recipes' && method === 'GET') {
         const cursor = url.searchParams.get('cursor') || '';
         if (cursor && !/^[a-f0-9]{64}$/.test(cursor)) fail(400, 'INVALID_CURSOR', '分页位置不正确。');
         const result = await database.list(cursor);
         const states = await favorites.states(user.id);
+        if (!cursor) { action = 'recipes.sync'; await record('success'); }
         return reply({ userId: user.id, items: result.items.map(event => publicEvent(event, favorites.value(event, user.id, states))), cursor: result.cursor });
       }
       if (route.startsWith('photo/') && method === 'GET') {
@@ -81,24 +170,32 @@ export function createApi({ database, password }) {
         const id = decodeURIComponent(route.slice(8));
         if (!id || id.length > 128 || id.includes('/')) fail(400, 'INVALID_ID', '菜谱编号不正确。');
         const states = await favorites.states(user.id);
+        action = 'recipe.history'; target = (await database.latest(id))?.recipe?.title || id; await record('success');
         return reply({ userId: user.id, items: (await database.history(id)).map(event => publicEvent(event, favorites.value(event, user.id, states))) });
       }
       if (route.startsWith('favorite/') && method === 'PUT') {
+        action = 'recipe.favorite';
         const id = decodeURIComponent(route.slice(9));
         if (!id || id.length > 128 || id.includes('/')) fail(400, 'INVALID_ID', '菜谱编号不正确。');
         const data = await body(request, 4096);
+        operationId = data?.mutationId;
         if (typeof data?.favorite !== 'boolean' || !/^[a-zA-Z0-9-]{8,128}$/.test(data?.mutationId || '')) fail(400, 'INVALID_FAVORITE', '收藏请求不完整，请重试。');
         if (data.expectedUserId && data.expectedUserId !== user.id) fail(409, 'ACCOUNT_CHANGED', '账号已在其他页面切换，请重新同步后操作。');
         const current = await database.latest(id);
         if (!current || current.deleted) fail(404, 'NOT_FOUND', '这道菜谱已不存在，请同步菜谱。');
         await favorites.preserveLegacy(current);
         await favorites.set(user.id, id, data.favorite, data.mutationId);
+        target = `${current.recipe.title} · ${data.favorite ? '收藏' : '取消收藏'}`; await record('success');
         return reply({ userId: user.id, id, favorite: data.favorite });
       }
       if (route.startsWith('recipe/') && ['PUT', 'DELETE'].includes(method)) {
+        action = method === 'DELETE' ? 'recipe.delete' : 'recipe.update';
         const id = decodeURIComponent(route.slice(7));
+        target = id;
+        if (!user.canEdit) fail(403, 'EDIT_PERMISSION_REQUIRED', '当前账号只有查看权限。请在“我的 → 账号授权”说明原因并申请编辑权限。');
         if (!id || id.length > 128 || id.includes('/')) fail(400, 'INVALID_ID', '菜谱编号不正确。');
         const data = await body(request); mutation(data);
+        operationId = data.mutationId;
         let recipe = null;
         if (method === 'PUT') {
           try { recipe = validateRecipe(data.recipe); } catch (error) { fail(400, 'INVALID_RECIPE', error.message); }
@@ -107,13 +204,18 @@ export function createApi({ database, password }) {
           // Favorites are private account state, never part of a shared save.
           recipe.favorite = false;
         }
-        await favorites.preserveLegacy(await database.latest(id));
-        const event = await database.commit({ id, recipe, baseRevision: data.baseRevision, mutationId: data.mutationId });
+        const before = await database.latest(id);
+        if (method === 'PUT') action = data.operation === 'import' ? 'recipe.import' : data.operation === 'restore' ? 'recipe.restore' : data.baseRevision === null ? 'recipe.create' : 'recipe.update';
+        target = recipe?.title || before?.recipe?.title || id;
+        await favorites.preserveLegacy(before);
+        const event = await database.commit({ id, recipe, baseRevision: data.baseRevision, mutationId: data.mutationId, auditEntry: receipt() });
+        await record('success');
         const states = await favorites.states(user.id);
         return reply({ userId: user.id, item: publicEvent(event, favorites.value(event, user.id, states)) });
       }
       fail(404, 'NOT_FOUND', '接口不存在，请确认已部署完整的峰味服务端。');
     } catch (error) {
+      if (action) await record(error.status === 403 ? 'denied' : 'failed').catch(() => {});
       if (error.status) return reply({ error: error.message, code: error.code || 'REQUEST_FAILED' }, error.status);
       console.error('Fengwei storage error:', error.code || error.name);
       return json({ error: '服务器存储暂时不可用，数据尚未确认保存，请稍后重试。', code: 'STORAGE_UNAVAILABLE' }, 503);

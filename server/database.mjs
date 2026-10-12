@@ -39,7 +39,7 @@ export class RecipeDatabase {
     if (!/^[a-f0-9]{64}$/.test(key)) return null;
     return this.store.get(`photos/${key}.txt`, { consistency: 'strong' });
   }
-  async commit({ id, recipe = null, baseRevision, mutationId }) {
+  async commit({ id, recipe = null, baseRevision, mutationId, auditEntry }) {
     if (baseRevision !== null && (typeof baseRevision !== 'string' || !baseRevision.startsWith(`recipes/${hash(id)}/`) || !eventPattern.test(baseRevision))) throw new ConflictError();
     const digest = hash(JSON.stringify({ id, recipe, baseRevision }));
     const { blobs } = await this.store.list({ prefix: `recipes/${hash(id)}/`, consistency: 'strong' });
@@ -61,6 +61,7 @@ export class RecipeDatabase {
     const event = {
       id, revision, mutationId, digest, deleted: !recipe, photoHash,
       savedAt: new Date().toISOString(),
+      ...(auditEntry ? { auditEntry } : {}),
       recipe: recipe ? { ...recipe, photo: '', createdAt: current?.recipe?.createdAt || recipe.createdAt, updatedAt: new Date().toISOString() } : null,
     };
     await this.store.setJSON(revision, event, { cacheControl: 'no-store' });

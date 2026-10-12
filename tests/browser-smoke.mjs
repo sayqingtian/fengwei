@@ -8,7 +8,7 @@ import { randomUUID } from 'node:crypto';
 const password = 'fengwei-browser-test-only-password';
 const dataDirectory = resolve('artifacts', `browser-test-data-${randomUUID()}`);
 function startServer() {
-  const child = spawn(process.execPath, ['scripts/serve.mjs'], { env: { ...process.env, NODE_ENV: 'test', FENGWEI_TEST_PASSWORD: password, RECIPE_DATA_DIR: dataDirectory, RECIPE_PORT: '4173' }, stdio: ['ignore', 'pipe', 'pipe'] });
+  const child = spawn(process.execPath, ['scripts/serve.mjs'], { env: { ...process.env, NODE_ENV: 'test', FENGWEI_TEST_PASSWORD: password, RECIPE_DATA_DIR: dataDirectory, RECIPE_PORT: '4182' }, stdio: ['ignore', 'pipe', 'pipe'] });
   return new Promise((resolve, reject) => {
     const timer = setTimeout(() => { child.kill(); reject(new Error('Local server did not start')); }, 10000);
     child.stdout.on('data', chunk => { if (String(chunk).includes('Local:')) { clearTimeout(timer); resolve(child); } });
@@ -23,11 +23,11 @@ const browser = await playwright.chromium.launch({ headless: true, ...(process.e
 const context = await browser.newContext({ viewport: { width: 390, height: 844 }, isMobile: true, hasTouch: true, deviceScaleFactor: 1 });
 const page = await context.newPage();
 const errors = []; page.on('pageerror', error => errors.push(error.message));
-const externalRequests = []; page.on('request', request => { if (/^https?:/.test(request.url()) && !request.url().startsWith('http://localhost:4173')) externalRequests.push(request.url()); });
+const externalRequests = []; page.on('request', request => { if (/^https?:/.test(request.url()) && !request.url().startsWith('http://localhost:4182')) externalRequests.push(request.url()); });
 const output = resolve('artifacts'); await mkdir(output, { recursive: true });
 let exported;
 try {
-  await page.goto('http://localhost:4173');
+  await page.goto('http://localhost:4182');
   assert.equal(await page.getByLabel('账号', { exact: true }).inputValue(), 'wupanfeng');
   await page.screenshot({ path: resolve(output, 'mobile-login.png'), fullPage: true });
   await page.getByLabel('密码', { exact: true }).fill(password);
@@ -81,7 +81,8 @@ try {
   await page.getByRole('dialog').getByRole('heading', { name: '奶奶的番茄炒蛋（改良版）' }).waitFor();
   await page.getByRole('button', { name: '关闭菜谱' }).click();
 
-  await page.getByRole('navigation', { name: '底部导航' }).getByRole('button', { name: '备份', exact: true }).click();
+  await page.getByRole('navigation', { name: '底部导航' }).getByRole('button', { name: '我的', exact: true }).click();
+  await page.getByRole('button', { name: '菜谱备份' }).click();
   await page.getByRole('heading', { name: '离线页面已准备好' }).waitFor();
   const downloadPromise = page.waitForEvent('download');
   await page.getByRole('button', { name: '下载备份' }).click();
@@ -113,7 +114,8 @@ try {
   await page.getByRole('button', { name: '删除', exact: true }).click();
   await page.getByRole('alertdialog').getByRole('button', { name: '删除菜谱' }).click();
   await page.getByRole('heading', { name: '第一道菜，想记点什么？' }).waitFor();
-  await page.getByRole('navigation', { name: '底部导航' }).getByRole('button', { name: '备份', exact: true }).click();
+  await page.getByRole('navigation', { name: '底部导航' }).getByRole('button', { name: '我的', exact: true }).click();
+  await page.getByRole('button', { name: '菜谱备份' }).click();
   await page.locator('#import-file').setInputFiles(exportPath);
   await page.getByRole('heading', { name: '已读到 1 道菜谱' }).waitFor();
   await page.getByRole('button', { name: '确认导入' }).click();
@@ -124,16 +126,16 @@ try {
   // A separate device has no IndexedDB cache, but reads the server's data.
   const second = await browser.newContext({ viewport: { width: 1280, height: 950 } });
   const other = await second.newPage();
-  await other.goto('http://localhost:4173');
+  await other.goto('http://localhost:4182');
   await other.getByLabel('密码', { exact: true }).fill(password);
   await other.getByRole('button', { name: '打开菜谱本' }).click();
   await other.getByRole('button', { name: '查看 奶奶的番茄炒蛋（改良版）' }).waitFor();
   await page.getByRole('button', { name: '查看 奶奶的番茄炒蛋（改良版）' }).click();
   await page.getByRole('button', { name: '编辑', exact: true }).click();
   await page.getByRole('textbox', { name: '我的小心得' }).fill('这份过期的修改不能覆盖另一台设备');
-  const remote = (await (await other.request.get('http://localhost:4173/api/recipes')).json()).items.find(item => !item.deleted);
-  const photo = (await (await other.request.get(`http://localhost:4173/api/photo/${remote.photoHash}`)).json()).photo;
-  const saved = await other.request.put(`http://localhost:4173/api/recipe/${remote.id}`, { data: { recipe: { ...remote.recipe, photo, notes: '另一台设备保存的小心得' }, baseRevision: remote.revision, mutationId: 'browser-other-device-save' } });
+  const remote = (await (await other.request.get('http://localhost:4182/api/recipes')).json()).items.find(item => !item.deleted);
+  const photo = (await (await other.request.get(`http://localhost:4182/api/photo/${remote.photoHash}`)).json()).photo;
+  const saved = await other.request.put(`http://localhost:4182/api/recipe/${remote.id}`, { data: { recipe: { ...remote.recipe, photo, notes: '另一台设备保存的小心得' }, baseRevision: remote.revision, mutationId: 'browser-other-device-save' } });
   assert.equal(saved.status(), 200);
   await page.getByRole('button', { name: '保存这道菜' }).click();
   await page.getByRole('alert').filter({ hasText: '另一台设备更新' }).waitFor();
@@ -197,14 +199,14 @@ try {
   assert.ok(!sessionCookie.value.includes(password));
   const resumed = await browser.newContext({ storageState: cookieState });
   const reopened = await resumed.newPage();
-  await reopened.goto('http://localhost:4173');
+  await reopened.goto('http://localhost:4182');
   await reopened.getByRole('button', { name: '查看 服务器记录的清汤面' }).waitFor();
   assert.equal(await reopened.locator('#login-form').count(), 0);
   await resumed.close();
   // Restart the HTTP server without retaining its process memory.
   await new Promise(resolve => { server.once('exit', resolve); server.kill(); });
   server = await startServer();
-  const afterRestart = await other.request.get('http://localhost:4173/api/recipes');
+  const afterRestart = await other.request.get('http://localhost:4182/api/recipes');
   assert.equal(afterRestart.status(), 200);
   assert.equal((await afterRestart.json()).items.filter(item => !item.deleted).length, 2);
   await page.getByRole('button', { name: '退出', exact: true }).click();

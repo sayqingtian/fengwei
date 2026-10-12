@@ -52,6 +52,10 @@ export async function createRemoteStore(local) {
         if (data.code === 'ACCOUNT_CHANGED') {
           await forget(); globalThis.dispatchEvent?.(new Event('fengwei:login-required'));
         }
+        if (data.code === 'EDIT_PERMISSION_REQUIRED') {
+          await acceptUser((await request('me')).user); await persist();
+          globalThis.dispatchEvent?.(new Event('fengwei:permissions-changed'));
+        }
         throw new ApiError(data.error || '服务器未完成操作，请重试。', response.status, data.code);
       }
       return data;
@@ -84,7 +88,7 @@ export async function createRemoteStore(local) {
   }
   async function write(id, recipe, method = 'PUT', options = {}) {
     ensureOnline();
-    const data = await request(`recipe/${encodeURIComponent(id)}`, { method, value: { ...(recipe ? { recipe: validateRecipe(recipe) } : {}), baseRevision: Object.hasOwn(options, 'baseRevision') ? options.baseRevision : revisions[id] || null, mutationId: createId() } });
+    const data = await request(`recipe/${encodeURIComponent(id)}`, { method, value: { ...(recipe ? { recipe: validateRecipe(recipe) } : {}), baseRevision: Object.hasOwn(options, 'baseRevision') ? options.baseRevision : revisions[id] || null, mutationId: createId(), ...(options.operation ? { operation: options.operation } : {}) } });
     await sameAccount(data);
     const item = data.item;
     revisions[id] = item.revision; hashes[id] = item.photoHash;
@@ -105,6 +109,7 @@ export async function createRemoteStore(local) {
   return {
     get user() { return user; },
     get readOnly() { return offline; },
+    get canEdit() { return !offline && !!user?.canEdit; },
     get authenticated() { return authenticated; },
     get conflicts() { return conflicts; },
     get cacheWarning() { return cacheWarning; },
@@ -136,7 +141,7 @@ export async function createRemoteStore(local) {
       incoming = incoming.map(validateRecipe); favorites = favorites.map(validateRecipe); ensureOnline();
       let completed = 0;
       try {
-        for (const recipe of incoming) { await write(recipe.id, recipe); completed++; }
+        for (const recipe of incoming) { await write(recipe.id, recipe, 'PUT', { operation: 'import' }); completed++; }
         // Merge positive favorites into this account; do not clear any existing
         // selections when importing generic recipes or another recipe backup.
         for (const recipe of favorites) if (recipe.favorite && !records.find(item => item.id === recipe.id)?.favorite) await setFavorite(recipe.id, true);
@@ -155,6 +160,36 @@ export async function createRemoteStore(local) {
       return forget();
     },
     forget,
+    async refreshUser() { ensureOnline(); await acceptUser((await request('me')).user); await persist(); return user; },
+    async changePassword(value) {
+      ensureOnline(); const data = await request('account/password', { method: 'POST', value });
+      await sameAccount(data); await acceptUser(data.user); await persist(); return user;
+    },
+    async permissions() { ensureOnline(); const data = await request('permissions'); await sameAccount(data); await acceptUser(data.user); await persist(); return data; },
+    async requestPermission(reason, requestId) { ensureOnline(); return request('permissions/request', { method: 'POST', value: { reason, requestId } }); },
+    async decidePermission(value) { ensureOnline(); return request('permissions/decision', { method: 'POST', value }); },
+    async audit({ cursor = '', query = '', result = '' } = {}) {
+      ensureOnline(); const params = new URLSearchParams({ cursor, q: query, result });
+      const data = await request(`audit?${params}`); await sameAccount(data); return data;
+    },
+    async exportAudit(format, { query = '', result = '' } = {}) {
+      ensureOnline(); const params = new URLSearchParams({ format, q: query, result });
+      const expectedUserId = user?.id;
+      let response;
+      try { response = await fetch(new URL(`audit/export?${params}`, apiBase), { credentials: 'same-origin', cache: 'no-store', signal: AbortSignal.timeout(25000) }); }
+      catch { throw new ApiError('日志导出暂时连接失败，请稍后重试。', 0, 'NETWORK'); }
+      if (!response.ok) {
+        const data = await response.json().catch(() => ({}));
+        if (response.status === 401) { await forget(); globalThis.dispatchEvent?.(new Event('fengwei:login-required')); }
+        throw new ApiError(data.error || '日志导出未完成，请重试。', response.status, data.code);
+      }
+      const encodedName = /filename\*=UTF-8''([^;]+)/i.exec(response.headers.get('content-disposition') || '')?.[1];
+      const filename = encodedName ? decodeURIComponent(encodedName) : `峰味-操作日志.${format}`;
+      const blob = await response.blob();
+      if (user?.id !== expectedUserId) throw new ApiError('账号已切换，日志导出已取消。', 409, 'ACCOUNT_CHANGED');
+      return { blob, filename, count: Number(response.headers.get('x-audit-count') || 0) };
+    },
+    async activity(action, recipeId) { if (offline || !authenticated) return; await request('activity', { method: 'POST', value: { action, ...(recipeId ? { recipeId } : {}) } }); },
     async history(id) {
       ensureOnline(); const data = await request(`history/${encodeURIComponent(id)}`); await sameAccount(data);
       const result = [];

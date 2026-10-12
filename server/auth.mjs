@@ -2,6 +2,7 @@ import { createHmac, randomBytes, randomUUID, scryptSync, timingSafeEqual } from
 import { DEFAULT_ACCOUNT } from './auth-config.mjs';
 import { hash } from './database.mjs';
 import { Accounts, publicUser, isUserId } from './accounts.mjs';
+import { Permissions } from './permissions.mjs';
 
 export const COOKIE = 'fengwei_session';
 export const SESSION_SECONDS = 90 * 24 * 3600;
@@ -16,6 +17,7 @@ export function testAccount(password) {
 }
 export function createAuth(store, account = DEFAULT_ACCOUNT) {
   const accounts = new Accounts(store, account);
+  const permissions = new Permissions(store, account?.username === 'wupanfeng' ? accounts.legacyId : null);
   const fingerprint = account ? hash(JSON.stringify(account)) : '';
   const prefix = `private/auth/${fingerprint}/`;
   async function signingKey(create = false) {
@@ -36,13 +38,15 @@ export function createAuth(store, account = DEFAULT_ACCOUNT) {
   const sign = (value, key, version = 3) => createHmac('sha256', key).update(`fengwei-session-v${version}:${value}`).digest('base64url');
   return {
     accounts,
+    permissions,
     get configured() { return !!account && /^[a-f0-9]{64}$/.test(account.passwordHash); },
     async check(username, password) { return !!await accounts.authenticate(username, password); },
     async issue(userOrNow, suppliedNow) {
       const now = typeof userOrNow === 'number' ? userOrNow : suppliedNow ?? Date.now();
-      const user = userOrNow && typeof userOrNow === 'object' ? userOrNow : await accounts.original();
+      const supplied = userOrNow && typeof userOrNow === 'object' ? userOrNow : null;
+      const user = supplied ? supplied.passwordHash ? supplied : await accounts.get(supplied.id) : await accounts.original();
       const record = await signingKey(true);
-      const payload = Buffer.from(JSON.stringify({ version: 3, userId: user.id, keyId: record.keyId, exp: Math.floor(now / 1000) + SESSION_SECONDS, nonce: randomBytes(16).toString('hex') })).toString('base64url');
+      const payload = Buffer.from(JSON.stringify({ version: 3, userId: user.id, credentialVersion: user.passwordVersion || 'initial', keyId: record.keyId, exp: Math.floor(now / 1000) + SESSION_SECONDS, nonce: randomBytes(16).toString('hex') })).toString('base64url');
       return `${payload}.${sign(payload, record.key)}`;
     },
     async verify(request, now = Date.now()) {
@@ -64,7 +68,8 @@ export function createAuth(store, account = DEFAULT_ACCOUNT) {
       if (!safeEqual(expected, parts[1])) return null;
       const user = payload.version === 2 ? await accounts.original() : await accounts.get(payload.userId);
       if (!user) return null;
-      return { user: publicUser(user), renew: payload.version === 2 || payload.exp - now / 1000 < RENEW_WITHIN_SECONDS };
+      if ((payload.credentialVersion || 'initial') !== (user.passwordVersion || 'initial')) return null;
+      return { user: publicUser(await permissions.profile(user)), account: user, renew: payload.version === 2 || payload.exp - now / 1000 < RENEW_WITHIN_SECONDS };
     },
   };
 }
