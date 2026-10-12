@@ -39,16 +39,18 @@ export class Accounts {
     if (!isUserId(id) || (version !== 'initial' && !uuid(version))) throw new Error('Invalid password revision');
     return `private/password-changes/${id}/${version}.json`;
   }
-  async withPassword(user) {
+  async withPassword(user, snapshot) {
     if (!user) return null;
+    snapshot ??= this.store.accountSnapshot ? await this.store.accountSnapshot(user.id) : null;
+    const read = key => snapshot ? snapshot.get(key) || null : this.store.get(key, { type: 'json', consistency: 'strong' });
     let state = { ...user, passwordVersion: 'initial' };
-    const head = await this.store.get(`private/password-heads/${user.id}.json`, { type: 'json', consistency: 'strong' });
-    let record = head ? await this.store.get(this.passwordKey(user.id, head.parentVersion), { type: 'json', consistency: 'strong' }) : null;
+    const head = await read(`private/password-heads/${user.id}.json`);
+    let record = head ? await read(this.passwordKey(user.id, head.parentVersion)) : null;
     if (head && !record) throw new Error('Password revision is not available');
     const seen = new Set();
     while (true) {
       const parent = state.passwordVersion;
-      record ||= await this.store.get(this.passwordKey(user.id, parent), { type: 'json', consistency: 'strong' });
+      record ||= await read(this.passwordKey(user.id, parent));
       if (!record) return state;
       const expectedParent = head && seen.size === 0 ? head.parentVersion : parent;
       if (record.userId !== user.id || record.parentVersion !== expectedParent || !uuid(record.version) || !/^[a-f0-9]{32}$/.test(record.salt) || !/^[a-f0-9]{64}$/.test(record.passwordHash) || !/^[a-f0-9]{64}$/.test(record.requestHash) || seen.has(record.version)) throw new Error('Invalid password revision');
@@ -59,11 +61,13 @@ export class Accounts {
   }
   async get(id) {
     if (!isUserId(id)) return null;
-    const stored = await this.store.get(this.key(id), { type: 'json', consistency: 'strong' });
-    if (stored) return this.withPassword(stored);
-    const pending = await this.store.get(`private/registrations/${id}.json`, { type: 'json', consistency: 'strong' });
+    const snapshot = this.store.accountSnapshot ? await this.store.accountSnapshot(id) : null;
+    const read = key => snapshot ? snapshot.get(key) || null : this.store.get(key, { type: 'json', consistency: 'strong' });
+    const stored = await read(this.key(id));
+    if (stored) return this.withPassword(stored, snapshot);
+    const pending = await read(`private/registrations/${id}.json`);
     const claim = pending && await this.store.get(this.nameKey(pending.displayName), { type: 'json', consistency: 'strong' });
-    return claim?.id === id ? this.withPassword(pending) : null;
+    return claim?.id === id ? this.withPassword(pending, snapshot) : null;
   }
   async list() {
     const { blobs } = await this.store.list({ prefix: 'private/users/', consistency: 'strong' });
@@ -76,7 +80,15 @@ export class Accounts {
     if (this.legacy && !users.some(user => user.id === this.legacyId)) users.push(await this.original(false));
     return users;
   }
-  async named(name) { return (await this.list()).filter(user => normalizeUsername(user.displayName) === normalizeUsername(name)); }
+  async named(name) {
+    const claim = await this.store.get(this.nameKey(name), { type: 'json', consistency: 'strong' });
+    if (claim) {
+      const user = await this.get(claim.id);
+      return user && normalizeUsername(user.displayName) === normalizeUsername(name) ? [user] : [];
+    }
+    // Older accounts without a username reservation retain ID/name compatibility.
+    return (await this.list()).filter(user => normalizeUsername(user.displayName) === normalizeUsername(name));
+  }
   async reserve(key, value) {
     // No read/write lock or fallback: storage must enforce create-only writes.
     try { await this.store.setJSON(key, value, { cacheControl: 'no-store', onlyIfNew: true }); return value; }

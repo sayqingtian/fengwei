@@ -3,6 +3,13 @@ import { createId, validateRecipe } from './store.js';
 const CACHE_KEY = 'fengwei-server-cache-v2';
 const OLD_CACHE_KEY = 'fengwei-server-cache-v1';
 const CACHE_AGE = 90 * 24 * 3600 * 1000;
+async function parallel(items, work, limit = 6) {
+  const result = new Array(items.length); let next = 0;
+  await Promise.all(Array.from({ length: Math.min(limit, items.length) }, async () => {
+    while (next < items.length) { const index = next++; result[index] = await work(items[index], index); }
+  }));
+  return result;
+}
 export class ApiError extends Error {
   constructor(message, status, code) { super(message); Object.assign(this, { status, code }); }
 }
@@ -15,8 +22,12 @@ export async function createRemoteStore(local) {
   const photoCache = new Map();
   for (const recipe of records) { const key = hashes[recipe.id]; if (key && recipe.photo) photoCache.set(key, recipe.photo); }
   let cacheWarning = !local;
+  let accountEpoch = 0, syncing = null;
+  const photoLoads = new Map();
+  let batchPhotos = true;
   const apiBase = new URL('./api/', import.meta.url);
   function resetMemory() {
+    accountEpoch++; photoLoads.clear();
     snapshot = null; records = []; revisions = Object.create(null); hashes = Object.create(null);
     conflicts = []; photoCache.clear(); user = null; authenticated = false; offline = false;
   }
@@ -79,19 +90,47 @@ export async function createRemoteStore(local) {
     let photo = '';
     if (item.photoHash) {
       photo = photoCache.get(item.photoHash);
-      if (!photo) { photo = (await request(`photo/${item.photoHash}`)).photo; photoCache.set(item.photoHash, photo); }
+      if (!photo) {
+        const key = item.photoHash;
+        if (!photoLoads.has(key)) {
+          const loading = request(`photo/${key}`).then(data => { photoCache.set(key, data.photo); return data.photo; }).finally(() => { if (photoLoads.get(key) === loading) photoLoads.delete(key); });
+          photoLoads.set(key, loading);
+        }
+        photo = await photoLoads.get(key);
+      }
     }
     return validateRecipe({ ...item.recipe, photo });
+  }
+  async function loadPhotos(items) {
+    if (!batchPhotos) return;
+    const missing = [...new Set(items.filter(item => !item.deleted && item.photoHash && !photoCache.has(item.photoHash)).map(item => item.photoHash))];
+    const groups = []; for (let i = 0; i < missing.length; i += 8) groups.push(missing.slice(i, i + 8));
+    await parallel(groups, async hashes => {
+      let pending = hashes;
+      while (pending.length) {
+        let data;
+        try { data = await request('photos', { method: 'POST', value: { hashes: pending } }); }
+        catch (error) { if (error.status === 404 && error.code === 'NOT_FOUND') { batchPhotos = false; return; } throw error; }
+        await sameAccount(data);
+        for (const [key, photo] of Object.entries(data.photos || {})) if (pending.includes(key)) photoCache.set(key, photo);
+        const remaining = data.pending || [];
+        if (remaining.length >= pending.length || remaining.some(key => !pending.includes(key))) throw new ApiError('照片读取未完成，请重新同步。', 503, 'INVALID_RESPONSE');
+        pending = remaining;
+      }
+    }, 3);
   }
   function ensureOnline() {
     if (offline || globalThis.navigator?.onLine === false) throw new ApiError('当前为离线预览，修改还没有保存。联网后请先同步，再保存。', 0, 'OFFLINE');
   }
   async function write(id, recipe, method = 'PUT', options = {}) {
     ensureOnline();
-    const data = await request(`recipe/${encodeURIComponent(id)}`, { method, value: { ...(recipe ? { recipe: validateRecipe(recipe) } : {}), baseRevision: Object.hasOwn(options, 'baseRevision') ? options.baseRevision : revisions[id] || null, mutationId: createId(), ...(options.operation ? { operation: options.operation } : {}) } });
+    const valid = recipe ? validateRecipe(recipe) : null;
+    const reused = valid?.photo && hashes[id] && photoCache.get(hashes[id]) === valid.photo ? hashes[id] : '';
+    const data = await request(`recipe/${encodeURIComponent(id)}`, { method, value: { ...(valid ? { recipe: { ...valid, photo: reused ? '' : valid.photo } } : {}), ...(reused ? { photoHash: reused } : {}), baseRevision: Object.hasOwn(options, 'baseRevision') ? options.baseRevision : revisions[id] || null, mutationId: createId(), ...(options.operation ? { operation: options.operation } : {}) } });
     await sameAccount(data);
     const item = data.item;
     revisions[id] = item.revision; hashes[id] = item.photoHash;
+    conflicts = conflicts.filter(key => key !== id); if (item.conflictCount > 1) conflicts.push(id);
     records = records.filter(record => record.id !== id);
     if (!item.deleted) {
       if (recipe?.photo && item.photoHash) photoCache.set(item.photoHash, recipe.photo);
@@ -106,6 +145,37 @@ export async function createRemoteStore(local) {
     records = records.map(recipe => recipe.id === id ? { ...recipe, favorite: data.favorite } : recipe);
     await persist();
   }
+  async function synchronize(job) {
+    try {
+      const next = [], newRevisions = Object.create(null), newHashes = Object.create(null), newConflicts = [];
+      let cursor = null, first = true;
+      do {
+        const data = await request(`recipes${cursor ? `?cursor=${encodeURIComponent(cursor)}` : ''}`);
+        if (job.epoch !== accountEpoch) throw new ApiError('账号已切换，本次同步已取消。', 409, 'ACCOUNT_CHANGED');
+        if (first) {
+          const principal = data.user || (await request('me')).user;
+          if (job.epoch !== accountEpoch) throw new ApiError('账号已切换，本次同步已取消。', 409, 'ACCOUNT_CHANGED');
+          await acceptUser(principal); job.epoch = accountEpoch; first = false;
+        }
+        await sameAccount(data);
+        await loadPhotos(data.items);
+        const hydrated = await parallel(data.items, hydrate);
+        if (job.epoch !== accountEpoch) throw new ApiError('账号已切换，本次同步已取消。', 409, 'ACCOUNT_CHANGED');
+        for (let i = 0; i < data.items.length; i++) {
+          const item = data.items[i]; newRevisions[item.id] = item.revision; newHashes[item.id] = item.photoHash;
+          if (item.conflictCount > 1) newConflicts.push(item.id); if (hydrated[i]) next.push(hydrated[i]);
+        }
+        cursor = data.cursor;
+      } while (cursor);
+      records = next; revisions = newRevisions; hashes = newHashes; conflicts = newConflicts;
+      offline = false; authenticated = true; await persist(); return records;
+    } catch (error) {
+      if (error.status === 401) throw error;
+      if (job.epoch !== accountEpoch) throw new ApiError('账号已切换，本次同步已取消。', 409, 'ACCOUNT_CHANGED');
+      if ((error.code === 'NETWORK' || error.code === 'STORAGE_UNAVAILABLE') && snapshot?.user && Date.now() - snapshot.authenticatedAt < CACHE_AGE) { offline = true; authenticated = true; return records; }
+      throw error;
+    }
+  }
   return {
     get user() { return user; },
     get readOnly() { return offline; },
@@ -113,26 +183,13 @@ export async function createRemoteStore(local) {
     get authenticated() { return authenticated; },
     get conflicts() { return conflicts; },
     get cacheWarning() { return cacheWarning; },
+    current: () => records.slice(),
     revision: id => revisions[id] || null,
-    async all() {
-      try {
-        await acceptUser((await request('me')).user);
-        const next = [], newRevisions = Object.create(null), newHashes = Object.create(null), newConflicts = [];
-        let cursor = null;
-        do {
-          const data = await request(`recipes${cursor ? `?cursor=${encodeURIComponent(cursor)}` : ''}`);
-          await sameAccount(data);
-          for (const item of data.items) { newRevisions[item.id] = item.revision; newHashes[item.id] = item.photoHash; if (item.conflictCount > 1) newConflicts.push(item.id); const recipe = await hydrate(item); if (recipe) next.push(recipe); }
-          cursor = data.cursor;
-        } while (cursor);
-        records = next; revisions = newRevisions; hashes = newHashes; conflicts = newConflicts;
-        offline = false; authenticated = true; await persist(); return records;
-      } catch (error) {
-        if ((error.code === 'NETWORK' || error.code === 'STORAGE_UNAVAILABLE') && snapshot?.user && Date.now() - snapshot.authenticatedAt < CACHE_AGE) {
-          offline = true; authenticated = true; return records;
-        }
-        throw error;
-      }
+    all() {
+      if (syncing?.epoch === accountEpoch) return syncing.promise;
+      const job = { epoch: accountEpoch };
+      job.promise = synchronize(job).finally(() => { if (syncing === job) syncing = null; }); syncing = job;
+      return job.promise;
     },
     put: (recipe, options) => write(recipe.id, recipe, 'PUT', options),
     remove: id => write(id, null, 'DELETE'),
@@ -149,10 +206,12 @@ export async function createRemoteStore(local) {
     },
     async login(username, password) {
       const data = await request('login', { method: 'POST', value: { username, password } });
+      accountEpoch++;
       await acceptUser(data.user); offline = false; authenticated = true;
     },
     async register(displayName, password, registrationId) {
       const data = await request('register', { method: 'POST', value: { displayName, password, registrationId } });
+      accountEpoch++;
       await acceptUser(data.user); offline = false; authenticated = true;
     },
     async requestPasswordRecovery(value) { ensureOnline(); return request('account/recovery', { method: 'POST', value }); },
@@ -172,8 +231,8 @@ export async function createRemoteStore(local) {
       await sameAccount(data); await acceptUser(data.user); await persist(); return user;
     },
     async permissions() { ensureOnline(); const data = await request('permissions'); await sameAccount(data); await acceptUser(data.user); await persist(); return data; },
-    async requestPermission(reason, requestId) { ensureOnline(); return request('permissions/request', { method: 'POST', value: { reason, requestId } }); },
-    async decidePermission(value) { ensureOnline(); return request('permissions/decision', { method: 'POST', value }); },
+    async requestPermission(reason, requestId) { ensureOnline(); const data = await request('permissions/request', { method: 'POST', value: { reason, requestId } }); await sameAccount(data); return data; },
+    async decidePermission(value) { ensureOnline(); const data = await request('permissions/decision', { method: 'POST', value }); await sameAccount(data); return data; },
     async audit({ cursor = '', query = '', result = '' } = {}) {
       ensureOnline(); const params = new URLSearchParams({ cursor, q: query, result });
       const data = await request(`audit?${params}`); await sameAccount(data); return data;
@@ -198,9 +257,8 @@ export async function createRemoteStore(local) {
     async activity(action, recipeId) { if (offline || !authenticated) return; await request('activity', { method: 'POST', value: { action, ...(recipeId ? { recipeId } : {}) } }); },
     async history(id) {
       ensureOnline(); const data = await request(`history/${encodeURIComponent(id)}`); await sameAccount(data);
-      const result = [];
-      for (const item of data.items) result.push({ ...item, recipe: await hydrate(item) });
-      return result;
+      await loadPhotos(data.items);
+      return parallel(data.items, async item => ({ ...item, recipe: await hydrate(item) }));
     },
     async legacy() { return user?.legacy && local ? local.all() : []; },
     setting: key => local?.setting(`fengwei-user:${user?.id || ''}:${key}`),

@@ -8,12 +8,12 @@ export class Favorites {
     if (!isUserId(userId)) throw new Error('Invalid favorite account');
     return `private/favorites/${userId}/${recipeId === undefined ? '' : `${hash(recipeId)}/`}`;
   }
-  async states(userId) {
-    const prefix = this.prefix(userId);
+  async states(userId, recipeId) {
+    const prefix = this.prefix(userId, recipeId), accountPrefix = this.prefix(userId);
     const { blobs } = await this.store.list({ prefix, consistency: 'strong' });
     const heads = new Map();
     for (const { key } of blobs) {
-      const match = /^([a-f0-9]{64})\/\d{13}-[a-zA-Z0-9-]+\.json$/.exec(key.slice(prefix.length));
+      const match = /^([a-f0-9]{64})\/\d{13}-[a-zA-Z0-9-]+\.json$/.exec(key.slice(accountPrefix.length));
       if (match && (!heads.has(match[1]) || key > heads.get(match[1]))) heads.set(match[1], key);
     }
     const states = new Map();

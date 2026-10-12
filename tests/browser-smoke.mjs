@@ -28,7 +28,8 @@ const output = resolve('artifacts'); await mkdir(output, { recursive: true });
 let exported;
 try {
   await page.goto('http://localhost:4182');
-  assert.equal(await page.getByLabel('账号', { exact: true }).inputValue(), 'wupanfeng');
+  assert.equal(await page.getByLabel('账号', { exact: true }).inputValue(), '');
+  await page.getByLabel('账号', { exact: true }).fill('wupanfeng');
   await page.screenshot({ path: resolve(output, 'mobile-login.png'), fullPage: true });
   await page.getByLabel('密码', { exact: true }).fill(password);
   await page.getByRole('button', { name: '打开菜谱本' }).click();
@@ -127,6 +128,7 @@ try {
   const second = await browser.newContext({ viewport: { width: 1280, height: 950 } });
   const other = await second.newPage();
   await other.goto('http://localhost:4182');
+  await other.getByLabel('账号', { exact: true }).fill('wupanfeng');
   await other.getByLabel('密码', { exact: true }).fill(password);
   await other.getByRole('button', { name: '打开菜谱本' }).click();
   await other.getByRole('button', { name: '查看 奶奶的番茄炒蛋（改良版）' }).waitFor();
@@ -154,17 +156,17 @@ try {
   await page.getByRole('dialog').getByRole('heading', { name: '奶奶的番茄炒蛋（改良版）' }).waitFor();
   await page.getByRole('button', { name: '关闭菜谱' }).click();
 
-  await context.setOffline(true);
-  await page.reload();
-  await page.getByRole('button', { name: '查看 奶奶的番茄炒蛋（改良版）' }).waitFor();
   await page.getByRole('button', { name: '记一道新菜' }).click();
   await page.getByRole('textbox', { name: '菜名' }).fill('离线记录的清汤面');
+  await context.setOffline(true);
   await page.getByRole('button', { name: '保存这道菜' }).click();
   await page.getByRole('alert').filter({ hasText: '离线预览' }).waitFor();
   assert.equal(await page.getByRole('textbox', { name: '菜名' }).inputValue(), '离线记录的清汤面');
   await page.getByRole('button', { name: '关闭编辑' }).click();
   await page.getByRole('button', { name: '放弃修改' }).click();
   await page.reload();
+  await page.getByRole('button', { name: '查看 奶奶的番茄炒蛋（改良版）' }).waitFor();
+  assert.equal(await page.getByRole('button', { name: '记一道新菜' }).count(), 0, 'offline preview cannot open a new editor');
   await page.getByRole('button', { name: '查看 奶奶的番茄炒蛋（改良版）' }).waitFor();
   assert.equal(await page.locator('.recipe-card').count(), 1);
   await page.screenshot({ path: resolve(output, 'mobile-recipes.png'), fullPage: true });

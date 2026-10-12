@@ -1,4 +1,4 @@
-import { hash } from './database.mjs';
+import { hash, RecipeDatabase } from './database.mjs';
 import { validateRecipe } from '../dist/store.js';
 import { createAuth, testAccount, sessionCookie } from './auth.mjs';
 import { readJsonBody as body } from './json-body.mjs';
@@ -7,6 +7,7 @@ import { Favorites } from './favorites.mjs';
 import { AuditLog } from './audit.mjs';
 import { makeAuditExport } from './audit-export.mjs';
 import { PasswordRecovery, RECOVERY_MESSAGE } from './password-recovery.mjs';
+import { requestStore } from './request-store.mjs';
 
 const failures = new Map();
 const registrations = new Map();
@@ -24,19 +25,22 @@ function mutation(data) {
   if (!data || typeof data !== 'object' || !/^[a-zA-Z0-9-]{8,128}$/.test(data.mutationId || '') || !Object.hasOwn(data, 'baseRevision')) fail(400, 'INVALID_MUTATION', '保存请求缺少版本信息，请刷新后重试。');
 }
 export function createApi({ database, password }) {
+  const store = requestStore(database.store);
+  database = new RecipeDatabase(store);
   const auth = password === undefined ? createAuth(database?.store) : createAuth(database?.store, testAccount(password));
   const favorites = new Favorites(database.store, auth.accounts.legacyId);
   const audit = new AuditLog(database.store), permissions = auth.permissions;
   const passwordFailures = new Map();
   const recovery = new PasswordRecovery(auth.accounts, permissions.adminId), recoveryAttempts = new Map();
-  return async request => {
+  return request => store.run(async () => {
+    const started = performance.now();
     let renewedCookie, actor, action, target = '', operationId;
     const receipt = () => audit.entry(actor, action, { target, operationId });
     const record = async result => {
       try { await audit.record(actor, action, { target, operationId, result }); }
       catch (error) { console.error('Fengwei audit index unavailable:', error.code || error.name); }
     };
-    const reply = (value, status = 200, headers = {}) => json(value, status, { ...(renewedCookie ? { 'Set-Cookie': renewedCookie } : {}), ...headers });
+    const reply = (value, status = 200, headers = {}) => json(value, status, { 'Server-Timing': `app;dur=${(performance.now() - started).toFixed(1)}`, ...(renewedCookie ? { 'Set-Cookie': renewedCookie } : {}), ...headers });
     try {
       if (!auth.configured) fail(503, 'NOT_CONFIGURED', '服务器账号尚未完成配置，请重新部署完整的峰味上传包。');
       const url = new URL(request.url), route = url.pathname.replace(/^.*?\/api\//, ''), method = request.method;
@@ -68,11 +72,10 @@ export function createApi({ database, password }) {
           fail(401, 'BAD_CREDENTIALS', '账号或密码不正确。');
         }
         failures.delete(key);
-        actor = publicUser(await permissions.profile(user));
-        // Verify durable storage before claiming that login/server setup works.
-        await database.headKeys();
+        const [profile, token] = await Promise.all([permissions.profile(user), auth.issue(user)]);
+        actor = publicUser(profile);
         await record('success');
-        return reply({ ok: true, user: actor }, 200, { 'Set-Cookie': sessionCookie(request, await auth.issue(user)) });
+        return reply({ ok: true, user: actor }, 200, { 'Set-Cookie': sessionCookie(request, token) });
       }
       if (route === 'register' && method === 'POST') {
         action = 'account.register';
@@ -123,7 +126,7 @@ export function createApi({ database, password }) {
         operationId = data?.mutationId;
         target = typeof data?.userId === 'string' ? data.userId : '';
         const item = await recovery.decide(user, data, receipt()); target = item.displayName;
-        await record('success');
+        if (item.status === 'rejected') await record('success');
         if (item.userId === user.id && item.status === 'reset') {
           const account = await auth.accounts.get(user.id);
           return reply({ userId: user.id, user: publicUser(await permissions.profile(account)), item }, 200, { 'Set-Cookie': sessionCookie(request, await auth.issue(account)) });
@@ -144,7 +147,7 @@ export function createApi({ database, password }) {
           }
           throw error;
         }
-        passwordFailures.delete(user.id); await record('success');
+        passwordFailures.delete(user.id);
         return reply({ ok: true, userId: user.id, user: publicUser(await permissions.profile(account)) }, 200, { 'Set-Cookie': sessionCookie(request, await auth.issue(account)) });
       }
       if (route === 'permissions' && method === 'GET') {
@@ -158,7 +161,7 @@ export function createApi({ database, password }) {
         const data = await body(request, 4096); operationId = data?.requestId;
         target = typeof data?.reason === 'string' ? data.reason.trim() : '';
         const item = await permissions.request(user, data, receipt());
-        await record('success'); return reply({ userId: user.id, item: { ...item, auditEntry: undefined } }, 201);
+        return reply({ userId: user.id, item: { ...item, auditEntry: undefined } }, 201);
       }
       if (route === 'permissions/decision' && method === 'POST') {
         if (user.role !== 'admin') fail(403, 'ADMIN_REQUIRED', '只有 wupanfeng 管理员可以处理授权。');
@@ -167,8 +170,8 @@ export function createApi({ database, password }) {
         if (!account) fail(404, 'ACCOUNT_NOT_FOUND', '账号不存在。');
         action = `permission.${data.action}`; operationId = data.mutationId; target = account.displayName;
         await permissions.decide(user, account, data, receipt());
-        await record('success');
-        return reply({ userId: user.id, account: publicUser(await permissions.profile(account)) });
+        const [profile, requests] = await Promise.all([permissions.profile(account), permissions.requests(account.id)]);
+        return reply({ userId: user.id, account: publicUser(profile), requests });
       }
       if (['audit', 'audit/export'].includes(route) && method === 'GET') {
         if (route === 'audit/export') { action = 'audit.export'; target = '操作日志'; }
@@ -200,22 +203,34 @@ export function createApi({ database, password }) {
       if (route === 'recipes' && method === 'GET') {
         const cursor = url.searchParams.get('cursor') || '';
         if (cursor && !/^[a-f0-9]{64}$/.test(cursor)) fail(400, 'INVALID_CURSOR', '分页位置不正确。');
-        const result = await database.list(cursor);
-        const states = await favorites.states(user.id);
+        const [result, states] = await Promise.all([database.list(cursor), favorites.states(user.id)]);
         if (!cursor) { action = 'recipes.sync'; await record('success'); }
-        return reply({ userId: user.id, items: result.items.map(event => publicEvent(event, favorites.value(event, user.id, states))), cursor: result.cursor });
+        return reply({ userId: user.id, user, items: result.items.map(event => publicEvent(event, favorites.value(event, user.id, states))), cursor: result.cursor });
       }
       if (route.startsWith('photo/') && method === 'GET') {
         const photo = await database.photo(route.slice(6));
         if (!photo) fail(404, 'NOT_FOUND', '照片不存在。');
         return reply({ photo });
       }
+      if (route === 'photos' && method === 'POST') {
+        const data = await body(request, 4096);
+        if (!Array.isArray(data?.hashes) || !data.hashes.length || data.hashes.length > 8 || data.hashes.some(key => !/^[a-f0-9]{64}$/.test(key))) fail(400, 'INVALID_PHOTOS', '照片读取请求不正确。');
+        const hashes = [...new Set(data.hashes)], loaded = await Promise.all(hashes.map(key => database.photo(key)));
+        if (loaded.some(photo => !photo)) fail(404, 'PHOTO_NOT_FOUND', '照片不存在，请重新同步菜谱。');
+        const photos = {}, pending = []; let bytes = 0;
+        for (let i = 0; i < hashes.length; i++) {
+          const size = Buffer.byteLength(loaded[i]);
+          if (bytes && bytes + size > 3 * 1024 * 1024) pending.push(hashes[i]);
+          else { photos[hashes[i]] = loaded[i]; bytes += size; }
+        }
+        return reply({ userId: user.id, photos, pending });
+      }
       if (route.startsWith('history/') && method === 'GET') {
         const id = decodeURIComponent(route.slice(8));
         if (!id || id.length > 128 || id.includes('/')) fail(400, 'INVALID_ID', '菜谱编号不正确。');
-        const states = await favorites.states(user.id);
-        action = 'recipe.history'; target = (await database.latest(id))?.recipe?.title || id; await record('success');
-        return reply({ userId: user.id, items: (await database.history(id)).map(event => publicEvent(event, favorites.value(event, user.id, states))) });
+        const [states, history] = await Promise.all([favorites.states(user.id), database.history(id)]);
+        action = 'recipe.history'; target = history[0]?.recipe?.title || id; await record('success');
+        return reply({ userId: user.id, items: history.map(event => publicEvent(event, favorites.value(event, user.id, states))) });
       }
       if (route.startsWith('favorite/') && method === 'PUT') {
         action = 'recipe.favorite';
@@ -239,6 +254,7 @@ export function createApi({ database, password }) {
         if (!user.canEdit) fail(403, 'EDIT_PERMISSION_REQUIRED', '当前账号只有查看权限。请在“我的 → 账号授权”说明原因并申请编辑权限。');
         if (!id || id.length > 128 || id.includes('/')) fail(400, 'INVALID_ID', '菜谱编号不正确。');
         const data = await body(request); mutation(data);
+        if (data.photoHash !== undefined && (method !== 'PUT' || typeof data.photoHash !== 'string' || !/^[a-f0-9]{64}$/.test(data.photoHash))) fail(400, 'INVALID_PHOTO', '照片版本不正确，请重新同步。');
         operationId = data.mutationId;
         let recipe = null;
         if (method === 'PUT') {
@@ -252,10 +268,10 @@ export function createApi({ database, password }) {
         if (method === 'PUT') action = data.operation === 'import' ? 'recipe.import' : data.operation === 'restore' ? 'recipe.restore' : data.baseRevision === null ? 'recipe.create' : 'recipe.update';
         target = recipe?.title || before?.recipe?.title || id;
         await favorites.preserveLegacy(before);
-        const event = await database.commit({ id, recipe, baseRevision: data.baseRevision, mutationId: data.mutationId, auditEntry: receipt() });
-        await record('success');
-        const states = await favorites.states(user.id);
-        return reply({ userId: user.id, item: publicEvent(event, favorites.value(event, user.id, states)) });
+        const event = await database.commit({ id, recipe, baseRevision: data.baseRevision, mutationId: data.mutationId, auditEntry: receipt(), photoHash: data.photoHash || '' });
+        // The committed immutable event already contains the durable audit receipt.
+        const [states, heads] = await Promise.all([favorites.states(user.id, id), database.headKeys(`recipes/${hash(id)}/`)]);
+        return reply({ userId: user.id, item: publicEvent({ ...event, conflictCount: heads[0]?.[2] || 1 }, favorites.value(event, user.id, states)) });
       }
       fail(404, 'NOT_FOUND', '接口不存在，请确认已部署完整的峰味服务端。');
     } catch (error) {
@@ -264,5 +280,5 @@ export function createApi({ database, password }) {
       console.error('Fengwei storage error:', error.code || error.name);
       return json({ error: '服务器存储暂时不可用，数据尚未确认保存，请稍后重试。', code: 'STORAGE_UNAVAILABLE' }, 503);
     }
-  };
+  });
 }

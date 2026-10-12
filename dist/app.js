@@ -162,7 +162,7 @@ function importSummary() {
 }
 
 async function refresh() { recipes = await db.all(); legacyCount = (await db.legacy().catch(() => [])).length; lastBackup = await db.setting('lastBackup'); render(); }
-async function changed() { await refresh(); channel?.postMessage('changed'); }
+async function changed() { recipes = db.current(); render(); channel?.postMessage('changed'); }
 
 function showModal(contents) {
   if (!$('#modal-root').hasChildNodes()) restoreFocus = document.activeElement;
@@ -400,7 +400,8 @@ async function submitRecoveryDecision(form) {
   recoveryBusy = true; form.inert = true; button.disabled = true; button.textContent = '正在处理…';
   try {
     const item = await db.decidePasswordRecovery({ ...decision, ...values, identityVerified: values.identityVerified === 'on' });
-    form.reset(); recoveryBusy = false; await closeModal(); await loadRecoveries();
+    if (recoveryData) recoveryData.requests = recoveryData.requests.map(request => request.id === item.id && request.userId === item.userId ? item : request);
+    form.reset(); recoveryBusy = false; await closeModal(); render();
     if (decision.action === 'reset' && db.user?.role === 'admin') {
       showModal(recoveryView.completed(item, values.newPassword));
       if (item.userId === db.user.id) channel?.postMessage({ type: 'credentials-changed', userId: db.user.id });
@@ -436,8 +437,10 @@ async function submitPermissionRequest(form) {
   if (button.disabled || !form.reportValidity()) return;
   button.disabled = true; error.hidden = true;
   try {
-    await db.requestPermission(new FormData(form).get('reason').trim(), permissionRequestId);
-    permissionRequestId = createId(); await loadPermissions(); toast('申请已提交，等待管理员审核。');
+    const data = await db.requestPermission(new FormData(form).get('reason').trim(), permissionRequestId);
+    permissionRequestId = createId();
+    permissionData = { ...permissionData, requests: [data.item, ...(permissionData?.requests || []).filter(item => item.id !== data.item.id)] };
+    render(); toast('申请已提交，等待管理员审核。');
   } catch (problem) { error.textContent = errorText(problem); error.hidden = false; button.disabled = false; }
 }
 
@@ -446,8 +449,12 @@ async function submitPermissionDecision(form) {
   if (button.disabled || !permissionDecision || !form.reportValidity()) return;
   button.disabled = true; error.hidden = true;
   try {
-    await db.decidePermission({ ...permissionDecision, note: new FormData(form).get('note').trim() });
-    await closeModal(); await loadPermissions(); channel?.postMessage('changed'); toast('账号权限已更新。');
+    const data = await db.decidePermission({ ...permissionDecision, note: new FormData(form).get('note').trim() });
+    if (permissionData && data.requests) {
+      permissionData.accounts = permissionData.accounts.map(account => account.id === data.account.id ? data.account : account);
+      permissionData.requests = [...data.requests, ...permissionData.requests.filter(item => item.userId !== data.account.id)];
+    }
+    await closeModal(); render(); channel?.postMessage('changed'); toast('账号权限已更新。');
   } catch (problem) { error.textContent = errorText(problem); error.hidden = false; button.disabled = false; }
 }
 

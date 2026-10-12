@@ -31,17 +31,23 @@ export class RecipeDatabase {
   async list(cursor = '') {
     const keys = (await this.headKeys()).filter(([id]) => id > cursor);
     // Keep a response comfortably below the cloud function body limit.
-    const chosen = keys.slice(0, 20);
-    const items = await Promise.all(chosen.map(async ([, key, count]) => ({ ...await this.read(key), conflictCount: count })));
-    return { items: items.filter(Boolean), cursor: keys.length > chosen.length ? chosen.at(-1)[0] : null };
+    const chosen = keys.slice(0, 100);
+    const loaded = await Promise.all(chosen.map(async ([, key, count]) => ({ ...await this.read(key), conflictCount: count })));
+    const items = []; let bytes = 0, consumed = 0;
+    for (const item of loaded) {
+      const size = Buffer.byteLength(JSON.stringify(item));
+      if (items.length && bytes + size > 384 * 1024) break;
+      items.push(item); bytes += size; consumed++;
+    }
+    return { items: items.filter(item => item.id), cursor: keys.length > consumed ? chosen[consumed - 1][0] : null };
   }
   async photo(key) {
     if (!/^[a-f0-9]{64}$/.test(key)) return null;
     return this.store.get(`photos/${key}.txt`, { consistency: 'strong' });
   }
-  async commit({ id, recipe = null, baseRevision, mutationId, auditEntry }) {
+  async commit({ id, recipe = null, baseRevision, mutationId, auditEntry, photoHash: reusedPhotoHash = '' }) {
     if (baseRevision !== null && (typeof baseRevision !== 'string' || !baseRevision.startsWith(`recipes/${hash(id)}/`) || !eventPattern.test(baseRevision))) throw new ConflictError();
-    const digest = hash(JSON.stringify({ id, recipe, baseRevision }));
+    const digest = hash(JSON.stringify({ id, recipe, baseRevision, ...(reusedPhotoHash ? { photoHash: reusedPhotoHash } : {}) }));
     const { blobs } = await this.store.list({ prefix: `recipes/${hash(id)}/`, consistency: 'strong' });
     const previousKey = blobs.find(item => item.key.endsWith(`-${mutationId}.json`))?.key;
     const previousAttempt = previousKey ? await this.read(previousKey) : null;
@@ -51,12 +57,13 @@ export class RecipeDatabase {
     }
     const current = await this.latest(id);
     if ((current?.revision || null) !== baseRevision) throw new ConflictError();
+    if (reusedPhotoHash && (!recipe || recipe.photo || reusedPhotoHash !== current?.photoHash)) throw new ConflictError('照片版本已变化，请同步后重新保存。');
     const revision = versionKey(id, generationOf(baseRevision) + 1, mutationId);
-    let photoHash = '';
+    let photoHash = reusedPhotoHash;
     if (recipe?.photo) {
       photoHash = hash(recipe.photo);
       // Same hash means identical content. Repeated writes are harmless.
-      await this.store.set(`photos/${photoHash}.txt`, recipe.photo, { cacheControl: 'no-store' });
+      if (photoHash !== current?.photoHash) await this.store.set(`photos/${photoHash}.txt`, recipe.photo, { cacheControl: 'no-store' });
     }
     const event = {
       id, revision, mutationId, digest, deleted: !recipe, photoHash,

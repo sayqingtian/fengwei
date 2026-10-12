@@ -40,12 +40,12 @@ export class Permissions {
     const existing = await this.store.get(key, { type: 'json', consistency: 'strong' });
     if (existing) {
       if (existing.reason !== data.reason.trim()) throw problem(409, 'REQUEST_CONFLICT', '此申请已提交，请刷新后重试。');
-      return existing;
+      return (await this.requests(user.id)).find(item => item.id === existing.id) || existing;
     }
     if ((await this.requests(user.id)).some(item => item.status === 'pending')) throw problem(409, 'REQUEST_PENDING', '已有申请等待管理员处理，请勿重复提交。');
     const item = { id: data.requestId, userId: user.id, displayName: user.displayName, reason: data.reason.trim(), createdAt: new Date().toISOString(), ...(auditEntry ? { auditEntry } : {}) };
     await this.store.setJSON(key, item, { cacheControl: 'no-store' });
-    return item;
+    return { ...item, status: 'pending' };
   }
   async decide(admin, target, data, auditEntry) {
     if (admin.id !== this.adminId) throw problem(403, 'ADMIN_REQUIRED', '只有管理员可以管理账号授权。');

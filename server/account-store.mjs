@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto';
 
-const accountPrefixes = ['private/users/', 'private/usernames/', 'private/registrations/', 'private/password-changes/', 'private/password-heads/', 'private/password-recovery-requests/', 'private/password-recovery-decisions/', 'private/password-recovery-limits/'];
+const accountPrefixes = ['private/users/', 'private/usernames/', 'private/registrations/', 'private/password-changes/', 'private/password-heads/', 'private/account-migrations/', 'private/password-recovery-requests/', 'private/password-recovery-decisions/', 'private/password-recovery-limits/'];
 const probePrefix = 'private/registration-storage-check';
 const bindingKey = 'private/account-database-binding.json';
 const isAccountKey = key => accountPrefixes.some(prefix => key.startsWith(prefix)) || key.startsWith(probePrefix);
@@ -43,11 +43,13 @@ class SupabaseAccountStore {
     this.source = source; this.url = new URL('/rest/v1/fengwei_account_records', origin);
     this.secretKey = secretKey; this.namespace = namespace; this.send = send;
     this.binding = { backend: 'supabase', project: createHash('sha256').update(origin.origin).digest('hex'), namespace };
+    this.readyAccounts = new Set();
   }
   async checkBinding() {
     if (!this.bindingCheck) this.bindingCheck = (async () => {
       const previous = await this.source.get(bindingKey, { type: 'json', consistency: 'strong' });
       if (previous && (previous.backend !== this.binding.backend || previous.project !== this.binding.project || previous.namespace !== this.namespace)) throw unavailable('ACCOUNT_DATABASE_CHANGED');
+      if (previous) this.bindingSaved ||= Promise.resolve();
     })();
     try { await this.bindingCheck; }
     catch (error) { this.bindingCheck = null; throw error; }
@@ -84,6 +86,43 @@ class SupabaseAccountStore {
     if (rows.length > 1 || (rows.length && rows[0].key !== key)) throw unavailable('ACCOUNT_DATABASE_UNAVAILABLE');
     return rows[0] || null;
   }
+  async accountSnapshot(id) {
+    if (!/^usr_[a-f0-9]{32}$/.test(id)) throw unavailable('ACCOUNT_DATABASE_UNSUPPORTED_KEY');
+    const changes = `private/password-changes/${id}/`, marker = `private/account-migrations/${id}.json`;
+    const fixed = [`private/users/${id}.json`, `private/registrations/${id}.json`, `private/password-heads/${id}.json`, marker];
+    const matches = key => fixed.includes(key) || key.startsWith(changes);
+    const read = async () => {
+      const records = new Map();
+      for (let offset = 0; ; offset += 1000) {
+        const query = [['namespace', `eq.${this.namespace}`], ['select', 'namespace,key,value'], ['order', 'key.asc'], ['limit', '1000'], ['offset', String(offset)], ['or', `(${fixed.map(key => `key.eq.${key}`).join(',')},and(key.gte.${changes},key.lt.${changes}\uffff))`]];
+        const rows = await this.request('GET', query);
+        if (rows.some(row => !matches(row.key))) throw unavailable('ACCOUNT_DATABASE_UNAVAILABLE');
+        for (const row of rows) records.set(row.key, row.value);
+        if (rows.length < 1000) return records;
+      }
+    };
+    let records = await read();
+    if (records.has(marker) && records.get(marker)?.version !== 1) throw unavailable('ACCOUNT_DATABASE_UNAVAILABLE');
+    if (records.get(marker)?.version !== 1) {
+      // Import the complete legacy credential chain once before relying on a
+      // single fresh SQL snapshot. Missing Blob keys then need no repeated IO.
+      const [users, registrations, head, history] = await Promise.all([
+        ...fixed.slice(0, 3).map(key => this.source.get(key, { type: 'json', consistency: 'strong' })),
+        this.source.list({ prefix: changes, consistency: 'strong' }),
+      ]);
+      const imports = fixed.slice(0, 3).map((key, index) => [key, [users, registrations, head][index]]);
+      const previous = await Promise.all(history.blobs.filter(({ key }) => !records.has(key)).map(async ({ key }) => [key, await this.source.get(key, { type: 'json', consistency: 'strong' })]));
+      imports.push(...previous);
+      // Unknown login IDs must remain read-only rather than create migration rows.
+      if (!records.size && imports.every(([, value]) => value == null)) return records;
+      await Promise.all(imports.filter(([key, value]) => !records.has(key) && value != null).map(([key, value]) => this.writeRecord(key, value, true)));
+      await this.writeRecord(marker, { version: 1 }, true);
+      records = await read();
+      if (records.get(marker)?.version !== 1) throw unavailable('ACCOUNT_DATABASE_UNAVAILABLE');
+    }
+    this.readyAccounts.add(id);
+    return records;
+  }
   async writeRecord(key, value, onlyIfNew) {
     const rows = await this.request('POST', [['on_conflict', 'namespace,key'], ['select', 'namespace,key,value']], { namespace: this.namespace, key, value }, `resolution=${onlyIfNew ? 'ignore' : 'merge'}-duplicates,return=representation`);
     if (!rows.length && onlyIfNew) return false;
@@ -109,7 +148,7 @@ class SupabaseAccountStore {
   async list(options = {}) {
     const prefix = options.prefix || '';
     if (!includesAccounts(prefix)) return this.source.list(options);
-    const keys = new Set((await this.source.list(options)).blobs.map(item => item.key));
+    const keys = new Set((await this.source.list(options)).blobs.map(item => item.key)), values = new Map();
     const limit = 1000;
     for (let offset = 0; ; offset += limit) {
       // C collation in the SQL schema makes this a literal prefix range,
@@ -117,10 +156,10 @@ class SupabaseAccountStore {
       const query = [['namespace', `eq.${this.namespace}`], ['select', 'namespace,key,value'], ['order', 'key.asc'], ['limit', String(limit)], ['offset', String(offset)]];
       if (prefix) query.push(['key', `gte.${prefix}`], ['key', `lt.${prefix}\uffff`]);
       const rows = await this.request('GET', query);
-      for (const row of rows) if (row.key.startsWith(prefix)) keys.add(row.key);
+      for (const row of rows) if (row.key.startsWith(prefix)) { keys.add(row.key); values.set(row.key, row.value); }
       if (rows.length < limit) break;
     }
-    return { blobs: [...keys].sort().map(key => ({ key })) };
+    return { blobs: [...keys].sort().map(key => ({ key })), records: values };
   }
   set(key, value, options = {}) {
     if (!isAccountKey(key)) {
@@ -137,7 +176,8 @@ class SupabaseAccountStore {
     if (options.onlyIfNew && !key.startsWith(probePrefix)) {
       // Import a pre-existing Blob reservation before attempting SQL INSERT.
       // The unique primary key selects one winner across concurrent instances.
-      const previous = await this.source.get(key, { type: 'json', consistency: 'strong' });
+      const migratedId = /^private\/(?:users|registrations|password-heads|password-changes)\/(usr_[a-f0-9]{32})(?:\/|\.json$)/.exec(key)?.[1];
+      const previous = migratedId && this.readyAccounts.has(migratedId) ? null : await this.source.get(key, { type: 'json', consistency: 'strong' });
       if (previous !== null && previous !== undefined) await this.writeRecord(key, previous, true);
     }
     if (!await this.writeRecord(key, value, !!options.onlyIfNew)) throw Object.assign(new Error('Account record already exists.'), { code: 'PRECONDITION_FAILED' });

@@ -23,7 +23,7 @@ export class AuditLog {
     const entry = this.entry(user, action, options); if (!entry) return;
     const { id } = entry;
     const key = `private/audit/${id}.json`;
-    if (await this.store.get(key, { type: 'json', consistency: 'strong' })) return;
+    if (options.operationId && await this.store.get(key, { type: 'json', consistency: 'strong' })) return;
     await this.store.setJSON(key, entry, { cacheControl: 'no-store' });
   }
   async filtered({ query = '', result = '' } = {}) {

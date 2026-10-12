@@ -46,6 +46,14 @@ function fixture() {
     }
     assert.equal(options.method, 'GET');
     const args = [target.searchParams.get('namespace').slice(3)], conditions = ['namespace = $1'];
+    const compound = target.searchParams.get('or');
+    if (compound) {
+      const branches = [];
+      for (const match of compound.matchAll(/key\.eq\.([^,()]+)/g)) { args.push(match[1]); branches.push(`key = $${args.length}`); }
+      const range = /and\(key\.gte\.([^,()]+),key\.lt\.([^,()]+)\)/.exec(compound);
+      assert.ok(range); args.push(range[1], range[2]); branches.push(`(key >= $${args.length - 1} and key < $${args.length})`);
+      conditions.push(`(${branches.join(' or ')})`);
+    }
     for (const filter of target.searchParams.getAll('key')) {
       const operator = filter.slice(0, filter.indexOf('.')), value = filter.slice(filter.indexOf('.') + 1);
       const symbols = { eq: '=', gte: '>=', lt: '<' }; assert.ok(symbols[operator]);
@@ -65,6 +73,21 @@ function fixture() {
   return { source, namespace, requests, settings, store, api, call };
 }
 const cookieOf = response => response.headers.get('set-cookie')?.split(';')[0];
+
+test('warm authentication reads one fresh SQL credential snapshot per request and never caches password changes across handlers', async () => {
+  const f = fixture(), first = f.api();
+  const login = await f.call(first, 'login', 'POST', { username: 'wupanfeng', password: fixturePassword }), cookie = cookieOf(login);
+  f.requests.length = 0;
+  for (let i = 0; i < 3; i++) assert.equal((await f.call(first, 'me', 'GET', undefined, cookie)).status, 200);
+  assert.equal(f.requests.length, 3); assert.ok(f.requests.every(request => request.method === 'GET' && request.url.searchParams.has('or')));
+  const changed = await f.call(f.api(), 'account/password', 'POST', { currentPassword: fixturePassword, newPassword: 'fresh-snapshot-new-password', confirmPassword: 'fresh-snapshot-new-password', mutationId: randomUUID() }, cookie);
+  assert.equal(changed.status, 200); f.requests.length = 0;
+  assert.equal((await f.call(first, 'me', 'GET', undefined, cookie)).status, 401); assert.equal(f.requests.length, 1);
+  assert.equal((await f.call(first, 'login', 'POST', { username: 'wupanfeng', password: 'fresh-snapshot-new-password' })).status, 200);
+  f.requests.length = 0;
+  assert.equal((await f.call(first, 'login', 'POST', { username: `usr_${'e'.repeat(32)}`, password: fixturePassword })).status, 401);
+  assert.ok(f.requests.every(request => request.method === 'GET'), 'unknown IDs never create account or migration rows');
+});
 
 test('password recovery uses the existing PostgreSQL table and concurrent admin decisions cannot overwrite credentials', async () => {
   const f = fixture(), first = f.api(), second = f.api();

@@ -1,0 +1,58 @@
+import { AsyncLocalStorage } from 'node:async_hooks';
+
+const immutable = key => /^recipes\/[a-f0-9]{64}\/\d{12}-\d{13}-[a-zA-Z0-9-]+\.json$/.test(key) || /^photos\/[a-f0-9]{64}\.txt$/.test(key) || /^private\/auth\/[a-f0-9]{64}\/\d{13}-[a-f0-9-]{36}\.json$/.test(key) || /^private\/permissions\/usr_[a-f0-9]{32}\/\d{12}-\d{13}-[a-zA-Z0-9-]+\.json$/.test(key) || /^private\/favorites\/usr_[a-f0-9]{32}\/[a-f0-9]{64}\/\d{13}-[a-zA-Z0-9-]+\.json$/.test(key);
+
+export function requestStore(source) {
+  const context = new AsyncLocalStorage(), retained = new Map();
+  let bytes = 0;
+  const clone = value => value === undefined ? undefined : structuredClone(value);
+  function retain(key, value) {
+    if (value === null || value === undefined) return;
+    const size = Buffer.byteLength(typeof value === 'string' ? value : JSON.stringify(value));
+    if (size > 8 * 1024 * 1024) return;
+    const previous = retained.get(key); if (previous) { bytes -= previous.size; retained.delete(key); }
+    retained.set(key, { value: clone(value), size, expires: Date.now() + 300000 }); bytes += size;
+    while (bytes > 8 * 1024 * 1024 || retained.size > 128) { const [oldest, item] = retained.entries().next().value; bytes -= item.size; retained.delete(oldest); }
+  }
+  async function memo(bucket, key, load) {
+    const scope = context.getStore();
+    if (!scope) return load();
+    const cache = scope[bucket];
+    if (!cache.has(key)) cache.set(key, Promise.resolve().then(load).catch(error => { cache.delete(key); throw error; }));
+    return clone(await cache.get(key));
+  }
+  function invalidate() { const scope = context.getStore(); if (scope) for (const cache of Object.values(scope)) cache.clear(); }
+  const store = {
+    run: work => context.run({ reads: new Map(), lists: new Map(), accounts: new Map() }, work),
+    async get(key, options = {}) {
+      const cacheKey = JSON.stringify([key, options]);
+      return memo('reads', cacheKey, async () => {
+        const id = /^private\/(?:users|registrations|password-heads|password-changes)\/(usr_[a-f0-9]{32})(?:\/|\.json$)/.exec(key)?.[1];
+        const snapshot = id && context.getStore()?.accounts.get(id);
+        if (snapshot) { const values = await snapshot; const value = values.get(key) ?? null; return options.type === 'json' ? clone(value) : value == null ? null : JSON.stringify(value); }
+        if (immutable(key)) {
+          const cached = retained.get(cacheKey);
+          if (cached && cached.expires > Date.now()) { retained.delete(cacheKey); retained.set(cacheKey, cached); return clone(cached.value); }
+          if (cached) { bytes -= cached.size; retained.delete(cacheKey); }
+        }
+        const value = await source.get(key, options);
+        if (immutable(key)) retain(cacheKey, value);
+        return value;
+      });
+    },
+    async list(options = {}) {
+      const result = await memo('lists', JSON.stringify(options), () => source.list(options));
+      const scope = context.getStore();
+      if (scope && result.records instanceof Map) for (const [path, value] of result.records) {
+        const key = JSON.stringify([path, { type: 'json', consistency: 'strong' }]);
+        if (!scope.reads.has(key)) scope.reads.set(key, Promise.resolve(clone(value)));
+      }
+      delete result.records;
+      return result;
+    },
+    async set(key, value, options) { invalidate(); const result = await source.set(key, value, options); invalidate(); return result; },
+    async setJSON(key, value, options) { invalidate(); const result = await source.setJSON(key, value, options); invalidate(); return result; },
+  };
+  if (source.accountSnapshot) store.accountSnapshot = id => memo('accounts', id, () => source.accountSnapshot(id));
+  return store;
+}
