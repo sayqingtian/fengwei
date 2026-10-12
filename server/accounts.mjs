@@ -13,7 +13,14 @@ export async function requireUniqueWrites(store) {
     try { await store.setJSON(key, { marker: 'protected' }, { onlyIfNew: true, cacheControl: 'no-store' }); }
     catch (error) { if (error.code !== 'PRECONDITION_FAILED') throw error; }
     try { await store.setJSON(key, { marker: 'conditional-write-unsupported' }, { onlyIfNew: true, cacheControl: 'no-store' }); }
-    catch (error) { if (error.code === 'PRECONDITION_FAILED') return; throw error; }
+    catch (error) {
+      if (error.code !== 'PRECONDITION_FAILED') throw error;
+      // Verify the ordinary Blob reader sees the unchanged native COS record.
+      // A successful reservation is useful only if account reads are durable.
+      const probe = await store.get(key, { type: 'json', consistency: 'strong' });
+      if (probe?.marker === 'protected') return;
+      throw problem(503, 'UNIQUE_STORAGE_UNAVAILABLE', '注册暂时不可用，请稍后重试或联系管理员。');
+    }
     throw problem(503, 'UNIQUE_STORAGE_UNAVAILABLE', '注册暂时不可用，请稍后重试或联系管理员。');
   })());
   try { await uniqueWriteChecks.get(store); }
