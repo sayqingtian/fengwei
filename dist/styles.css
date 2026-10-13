@@ -26,6 +26,8 @@
 .full-backup-passwords { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 18px; margin: 18px 0; }
 
 /* Keep touch controls readable without triggering focus zoom on mobile Safari. */
+/* Dialog headings receive initial focus for announcements, not as interactive controls. */
+#auth-title:focus, #modal-title:focus { outline: none; }
 html { -webkit-text-size-adjust: 100%; text-size-adjust: 100%; }
 button, a, select, input, textarea, label[for] { touch-action: manipulation; }
 .search-box { min-width: 0; }
