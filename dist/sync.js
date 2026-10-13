@@ -159,11 +159,17 @@ export async function createRemoteStore(local) {
     try { if (value) globalThis.localStorage?.setItem(LOGOUT_KEY, JSON.stringify(value)); else globalThis.localStorage?.removeItem(LOGOUT_KEY); } catch { cacheWarning = true; }
     try { await local?.setSetting(LOGOUT_KEY, value); } catch { cacheWarning = true; }
   }
-  async function finishLogout() {
-    if (!pendingLogout) return;
-    try { await request('logout', { method: 'POST', value: pendingLogout, retrySafe: true }); }
-    catch (error) { if (error.code !== 'ACCOUNT_CHANGED') throw error; }
-    await markLogout(null);
+  let logoutInFlight = null;
+  function finishLogout() {
+    if (logoutInFlight) return logoutInFlight;
+    if (!pendingLogout) return Promise.resolve();
+    const value = pendingLogout;
+    const job = (async () => {
+      try { await request('logout', { method: 'POST', value, retrySafe: true }); }
+      catch (error) { if (error.code !== 'ACCOUNT_CHANGED') throw error; }
+      if (pendingLogout === value) await markLogout(null);
+    })().finally(() => { if (logoutInFlight === job) logoutInFlight = null; });
+    logoutInFlight = job; return job;
   }
   const uncertain = error => ['NETWORK', 'INVALID_RESPONSE', 'STORAGE_UNAVAILABLE'].includes(error.code) || error.status >= 500;
   const pendingWrites = new Map();
@@ -337,7 +343,8 @@ export async function createRemoteStore(local) {
       await markLogout({ expectedUserId: owner });
       pendingWrites.delete(owner);
       const cleared = await forget();
-      if (globalThis.navigator?.onLine !== false) await finishLogout().catch(() => {});
+      if (all) await markLogout(null);
+      else if (globalThis.navigator?.onLine !== false) finishLogout().catch(() => {});
       return cleared;
     },
     forget,

@@ -202,3 +202,26 @@ test('first service-worker installation does not show an update banner', () => {
   container.controller = worker; container.dispatchEvent(new Event('controllerchange'));
   assert.equal(notices, 0);
 });
+
+test('an unreachable logout returns immediately and reconnect plus login share a single pending revocation', async t => {
+  const f = await fixture(t), original = globalThis.fetch, local = localStore();
+  t.after(() => { globalThis.fetch = original; });
+  let cookie = f.cookie, release, logoutCalls = 0, loginCalls = 0;
+  const hold = new Promise(resolve => { release = resolve; });
+  globalThis.fetch = async (url, options = {}) => {
+    const target = new URL(url), path = target.pathname.split('/api/')[1];
+    if (path === 'logout') { logoutCalls++; await hold; }
+    if (path === 'login') loginCalls++;
+    const response = await f.api(new Request(`https://recipes.test/api/${path}`, { ...options, headers: { ...options.headers, Cookie: cookie, Origin: 'https://recipes.test' } }));
+    cookie = cookieOf(response) || cookie; return response;
+  };
+  const client = await createRemoteStore(local); await client.all();
+  let timeout;
+  await Promise.race([client.logout(), new Promise((_, reject) => { timeout = setTimeout(() => reject(new Error('Local logout waited for server')), 500); })]).finally(() => clearTimeout(timeout));
+  assert.equal(client.user, null); assert.equal(local.data.get('fengwei-server-cache-v2'), null);
+  const reconnect = client.completeLogout(), login = client.login('wupanfeng', password);
+  assert.equal(logoutCalls, 1); assert.equal(loginCalls, 0);
+  release(); await reconnect; await login;
+  assert.equal(logoutCalls, 1); assert.equal(loginCalls, 1);
+  await client.all(); assert.equal(client.user.id, f.user.id);
+});

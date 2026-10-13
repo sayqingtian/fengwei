@@ -792,7 +792,7 @@ async function handleAction(button) {
       permissionData = null; auditData = null; recoveryData = null; trashData = null; retentionData = null; recoveryError = ''; auditQuery = ''; auditResult = ''; auditFrom = ''; auditTo = '';
       recipes = []; pendingImport = null; historyItems = []; page = 'recipes'; legacyCount = 0;
       channel?.postMessage({ type: 'account-changed', userId: null }); render();
-      showLogin(!cleared || !draftsCleared ? '已退出登录。部分本机数据未能清理，可在浏览器设置中清除此网站数据。' : db.pendingLogout ? '已退出并清除此设备数据。联网后将自动注销服务器会话。' : all ? '已退出所有设备，请重新登录。' : '已退出登录，此设备缓存和草稿已清除。'); break;
+      showLogin(!cleared || !draftsCleared ? '已退出登录。部分本机数据未能清理，可在浏览器设置中清除此网站数据。' : db.pendingLogout ? '已退出并清除此设备数据。服务器会话将在网络可用时完成注销。' : all ? '已退出所有设备，请重新登录。' : '已退出登录，此设备缓存和草稿已清除。'); break;
     }
     case 'history': await showHistory(id); break;
     case 'restore-version': await restoreVersion(Number(button.dataset.index)); break;
@@ -952,7 +952,7 @@ channel?.addEventListener('message', async event => {
 });
 document.addEventListener('visibilitychange', async () => {
   if (document.visibilityState === 'hidden') saveDraftNow();
-  if (document.visibilityState === 'visible') workerRegistration?.update().catch(() => {});
+  if (document.visibilityState === 'visible') { workerRegistration?.update().catch(() => {}); db?.completeLogout().catch(() => {}); }
   if (document.visibilityState === 'visible' && db?.authenticated && navigator.onLine !== false && !db.readOnly) {
     try { const role = db.user?.role; await db.refreshUser(); if (role !== db.user?.role) { render(); if (page === 'permissions') await loadPermissions(); toast(`账号权限已更新：${roleName(db.user)}`); } } catch {}
   }

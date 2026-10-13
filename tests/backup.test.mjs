@@ -141,6 +141,8 @@ test('logout during backup cancels the pending export and clears private cached 
   await f.client.logout(); release();
   await assert.rejects(backup, error => error.code === 'ACCOUNT_CHANGED');
   assert.deepEqual(f.client.current(), []);
+  // Local logout is immediate; let background revocation finish before deleting the fixture.
+  await f.client.completeLogout();
 });
 test('all backup parts restore through the real server with images and private favorites intact', async t => {
   const f = await fixture(t);
