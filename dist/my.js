@@ -4,7 +4,7 @@ export const actionNames = {
   'account.password': '修改密码', 'account.delete': '删除账号', 'audit.export': '导出操作日志', 'photo.optimize': '优化图片',
   'account.recovery.request': '申请找回密码', 'account.recovery.reset': '管理员重置密码', 'account.recovery.reject': '拒绝找回申请',
   'recipes.sync': '同步菜谱', 'recipe.view': '查看菜谱', 'recipe.history': '查看历史版本',
-  'recipe.create': '新增菜谱', 'recipe.update': '编辑菜谱', 'recipe.delete': '删除菜谱',
+  'recipe.create': '新增菜谱', 'recipe.update': '编辑菜谱', 'recipe.delete': '删除菜谱', 'recipe.purge': '彻底删除菜谱',
   'recipe.restore': '恢复历史版本', 'recipe.import': '导入菜谱', 'recipe.favorite': '收藏操作',
   'recipe.cook': '开始跟着做', 'backup.export': '导出备份',
   'permission.request': '申请编辑权限', 'permission.approve': '批准编辑权限',
@@ -19,7 +19,7 @@ export function myPages({ icon, esc }) {
   return {
     back,
     overview(user, favoriteCount, recoveryCount = 0) {
-      return `<h1 class="page-title">我的</h1><p class="page-lead">管理自己的账号、权限和菜谱备份。</p><section class="panel my-profile"><div class="panel-icon">${icon('people')}</div><div><h2>${esc(user?.displayName || '')}</h2><p><span class="role-badge">${roleName(user)}</span> · ${favoriteCount} 道个人收藏</p></div></section><div class="my-sections"><section class="panel"><h2>账号与权限</h2>${link('account', 'people', '我的账号', '用户名、登录 ID 与登录状态')}${user?.role !== 'admin' ? link('permissions', 'lock', '账号授权', '说明申请原因，查看审批结果') : ''}</section><section class="panel"><h2>数据管理</h2>${link('backup', 'backup', '菜谱备份', '下载备份、导入菜谱与恢复数据')}${link('drafts', 'edit', '本机草稿', '找回未提交的菜谱，仅在此设备保存')}${user?.canEdit ? link('trash', 'trash', '回收站', '找回误删的菜谱，恢复食材、步骤与照片') : ''}</section>${user?.role === 'admin' ? `<section class="panel"><h2>管理员工具</h2>${link('permissions', 'lock', '账号授权', '审批编辑申请，管理与撤销账号权限')}${link('recovery', 'lock', '密码找回', recoveryCount ? `${recoveryCount} 条待处理申请，请核实身份后重置` : '查看找回申请，重置后线下告知用户')}${link('logs', 'clock', '操作日志', '查看用户行为，按账号与操作搜索')}${link('images', 'photo', '图片空间', '查看图片占用，批量压缩已有照片')}</section>` : ''}</div>`;
+      return `<h1 class="page-title">我的</h1><p class="page-lead">管理自己的账号、权限和菜谱备份。</p><section class="panel my-profile"><div class="panel-icon">${icon('people')}</div><div><h2>${esc(user?.displayName || '')}</h2><p><span class="role-badge">${roleName(user)}</span> · ${favoriteCount} 道个人收藏</p></div></section><div class="my-sections"><section class="panel"><h2>账号与权限</h2>${link('account', 'people', '我的账号', '用户名、登录 ID 与登录状态')}${user?.role !== 'admin' ? link('permissions', 'lock', '账号授权', '说明申请原因，查看审批结果') : ''}</section><section class="panel"><h2>数据管理</h2>${link('backup', 'backup', '菜谱备份', '下载备份、导入菜谱与恢复数据')}${link('sync', 'cloud', '后台同步', '查看待上传修改，重试或处理同步失败')}${link('drafts', 'edit', '本机草稿', '找回未提交的菜谱，仅在此设备保存')}${user?.canEdit ? link('trash', 'trash', '回收站', '找回误删的菜谱，恢复食材、步骤与照片') : ''}</section>${user?.role === 'admin' ? `<section class="panel"><h2>管理员工具</h2>${link('permissions', 'lock', '账号授权', '审批编辑申请，管理与撤销账号权限')}${link('recovery', 'lock', '密码找回', recoveryCount ? `${recoveryCount} 条待处理申请，请核实身份后重置` : '查看找回申请，重置后线下告知用户')}${link('logs', 'clock', '操作日志', '查看用户行为，按账号与操作搜索')}${link('images', 'photo', '图片空间', '查看图片占用，批量压缩已有照片')}</section>` : ''}</div>`;
     },
     permissions(user, data, error = '') {
       const admin = user?.role === 'admin';

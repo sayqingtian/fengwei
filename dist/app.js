@@ -101,7 +101,7 @@ function markDraftDirty() {
 }
 function removeDraft(owner, id) {
   clearTimeout(draftTimer);
-  try { draftStore?.remove(owner, id); } catch { toast('服务器已保存，但旧草稿未能清理，请稍后在本机草稿中删除。'); }
+  try { draftStore?.remove(owner, id); } catch { toast('菜谱已保存，但旧草稿未能清理，请稍后在本机草稿中删除。'); }
 }
 function clearEditorMemory() {
   clearTimeout(draftTimer); editor = null; detailId = null; cookStep = null;
@@ -114,7 +114,7 @@ function draftsPage() {
   return `${my.back()}<h1 class="page-title">本机草稿</h1><p class="page-lead">只有当前账号可以在此设备找回。草稿尚未同步，退出登录会清理；提交后自动移除。</p>${draftProblem ? `<p class="form-error" role="alert">${esc(draftProblem)}</p>` : ''}<section class="panel version-list">${items.map(item => `<article><h2>${esc(item.recipe.title || '还没取名的菜谱')}</h2><p>${esc(new Date(item.savedAt).toLocaleString('zh-CN'))} · ${item.isNew ? '新菜谱' : '未提交修改'}</p><div class="management-actions"><button class="button primary" data-action="resume-draft" data-id="${esc(item.recipe.id)}" ${db?.canEdit ? '' : 'disabled'}>继续编辑</button><button class="button ghost" data-action="discard-draft" data-id="${esc(item.recipe.id)}">删除草稿</button></div></article>`).join('') || '<p class="empty-management">此设备没有未提交的草稿。</p>'}</section>${items.length && !db?.canEdit ? '<p class="permission-note">联网并获得编辑权限后可继续编辑；现有草稿仍保留。</p>' : ''}`;
 }
 function trashPage() {
-  return `${my.back()}<div class="section-head"><h1 class="page-title">回收站</h1><button class="button ghost" data-action="reload-trash" ${trashBusy ? 'disabled' : ''}>刷新回收站</button></div><p class="page-lead">删除的共享菜谱保留在这里。恢复会生成新版本，食材、步骤和照片一并找回。</p>${trashError ? `<p class="form-error" role="alert">${esc(trashError)}</p>` : ''}<section class="panel version-list">${trashData?.items.map(item => `<article><h2>${esc(item.title)}</h2><p>删除于 ${esc(new Date(item.deletedAt).toLocaleString('zh-CN'))}</p><div class="management-actions"><button class="button primary" data-action="restore-trash" data-id="${esc(item.id)}" ${item.version && db?.canEdit ? '' : 'disabled'}>恢复菜谱</button><button class="button ghost" data-action="history" data-id="${esc(item.id)}">查看历史</button></div></article>`).join('') || `<p class="empty-management">${trashBusy ? '正在读取回收站…' : '回收站为空。'}</p>`}${trashData?.cursor ? '<button class="button ghost" data-action="load-more-trash">加载更多</button>' : ''}</section>`;
+  return `${my.back()}<div class="section-head"><h1 class="page-title">回收站</h1><button class="button ghost" data-action="reload-trash" ${trashBusy ? 'disabled' : ''}>刷新回收站</button></div><p class="page-lead">删除的共享菜谱保留在这里。恢复会生成新版本；彻底删除会移除菜谱及全部历史，无法撤销。图片资源暂不随此操作清理，避免影响共用图片的其他菜谱。</p>${trashError ? `<p class="form-error" role="alert">${esc(trashError)}</p>` : ''}<section class="panel version-list">${trashData?.items.map(item => `<article><h2>${esc(item.title)}</h2><p>删除于 ${esc(new Date(item.deletedAt).toLocaleString('zh-CN'))}</p><div class="management-actions"><button class="button primary" data-action="restore-trash" data-id="${esc(item.id)}" ${!item.purging && item.version && db?.canEdit ? '' : 'disabled'}>恢复菜谱</button><button class="button ghost" data-action="history" data-id="${esc(item.id)}" ${item.purging ? 'disabled' : ''}>查看历史</button><button class="button danger" data-action="purge-trash" data-id="${esc(item.id)}">${item.purging ? '继续彻底删除' : '彻底删除'}</button></div></article>`).join('') || `<p class="empty-management">${trashBusy ? '正在读取回收站…' : '回收站为空。'}</p>`}${trashData?.cursor ? '<button class="button ghost" data-action="load-more-trash">加载更多</button>' : ''}</section>`;
 }
 async function loadTrash(more = false) {
   if (trashBusy || !db?.canEdit) return;
@@ -138,6 +138,16 @@ async function restoreTrash(id) {
   if (!version?.recipe) throw new Error('历史版本暂时不可用，请刷新回收站。');
   await db.put(version.recipe, { baseRevision: item.revision, operation: 'restore' });
   await changed(); await loadTrash(); showDetail(id); toast('菜谱和照片已恢复');
+}
+async function purgeTrash(id) {
+  const item = trashData?.items.find(row => row.id === id); if (!item) return;
+  if (!await ask('彻底删除这道菜？', `“${item.title}”的菜谱内容和所有历史版本都将永久移除，所有账号均无法恢复。已下载的备份不受影响。`, '彻底删除', true)) return;
+  const mutationId = createId();
+  try {
+    let result;
+    do { result = await db.purgeRecipe(id, item.revision, mutationId); } while (!result.complete);
+    await refresh(); await loadTrash(); toast('菜谱及全部历史版本已彻底删除');
+  } catch (error) { await loadTrash(); throw error; }
 }
 function retentionPanel() {
   if (db?.user?.role !== 'admin') return '';
@@ -191,18 +201,45 @@ function toast(message) {
 }
 
 function nav(mobile = false) {
-  return `<nav class="${mobile ? 'mobile-nav' : 'desktop-nav'}" aria-label="${mobile ? '底部' : '主'}导航">${[['recipes', 'book', '菜谱本'], ['favorites', 'heart', '收藏夹'], ['my', 'people', '我的']].map(([id, mark, name]) => `<button class="nav-item ${(page === id || (id === 'my' && ['backup', 'account', 'permissions', 'logs', 'recovery', 'images', 'trash', 'drafts'].includes(page))) ? 'active' : ''}" data-action="navigate" data-page="${id}" ${(page === id || (id === 'my' && ['backup', 'account', 'permissions', 'logs', 'recovery', 'images', 'trash', 'drafts'].includes(page))) ? 'aria-current="page"' : ''}>${icon(mark)}<span>${name}</span></button>`).join('')}</nav>`;
+  return `<nav class="${mobile ? 'mobile-nav' : 'desktop-nav'}" aria-label="${mobile ? '底部' : '主'}导航">${[['recipes', 'book', '菜谱本'], ['favorites', 'heart', '收藏夹'], ['my', 'people', '我的']].map(([id, mark, name]) => `<button class="nav-item ${(page === id || (id === 'my' && ['backup', 'account', 'permissions', 'logs', 'recovery', 'images', 'trash', 'drafts', 'sync'].includes(page))) ? 'active' : ''}" data-action="navigate" data-page="${id}" ${(page === id || (id === 'my' && ['backup', 'account', 'permissions', 'logs', 'recovery', 'images', 'trash', 'drafts', 'sync'].includes(page))) ? 'aria-current="page"' : ''}>${icon(mark)}<span>${name}</span></button>`).join('')}</nav>`;
 }
 
 function render() {
-  $('#app').innerHTML = `<a class="skip-link" href="#main">跳到菜谱内容</a><div class="shell"><header class="header"><div class="brand"><div class="brand-icon">${icon('bowl')}</div><div><div class="brand-name">峰味</div><div class="brand-caption">共享菜谱，自己的收藏</div></div></div>${nav()}<span class="private-pill">${icon('people')}共享菜谱 · 独立收藏</span></header>${syncBar()}<main id="main">${draftNotice()}${page === 'drafts' ? draftsPage() : page === 'trash' ? trashPage() : page === 'my' ? my.overview(db?.user, recipes.filter(item => item.favorite).length, recoveryData?.requests.filter(item => item.status === 'pending').length || 0) : page === 'backup' ? my.back() + backupPage() : page === 'account' ? my.back() + accountPage() : page === 'permissions' ? my.permissions(db?.user, permissionData, permissionError) : page === 'recovery' ? my.back() + recoveryView.inbox(db?.user, recoveryData, { error: recoveryError, loading: recoveryLoading }) : page === 'images' ? my.back() + imagePage({ user: db?.user, data: imageData, busy: imageBusy, progress: imageProgress, error: imageError, saved: imageSaved }) : page === 'logs' ? my.logs(db?.user, auditData, { query: auditQuery, result: auditResult, from: auditFrom, to: auditTo, error: auditError, loading: auditLoading, exporting: auditExportBusy, retention: retentionPanel() }) : recipePage()}</main><footer class="footer"><span>一餐一饭，都是生活的小事。</span><span>${icon('leaf')}把好味道分享给彼此 · v${APP_VERSION}</span></footer></div>${nav(true)}`;
+  $('#app').innerHTML = `<a class="skip-link" href="#main">跳到菜谱内容</a><div class="shell"><header class="header"><div class="brand"><div class="brand-icon">${icon('bowl')}</div><div><div class="brand-name">峰味</div><div class="brand-caption">共享菜谱，自己的收藏</div></div></div>${nav()}<span class="private-pill">${icon('people')}共享菜谱 · 独立收藏</span></header><div id="sync-status">${syncBar()}</div><main id="main">${draftNotice()}${page === 'sync' ? syncPage() : page === 'drafts' ? draftsPage() : page === 'trash' ? trashPage() : page === 'my' ? my.overview(db?.user, recipes.filter(item => item.favorite).length, recoveryData?.requests.filter(item => item.status === 'pending').length || 0) : page === 'backup' ? my.back() + backupPage() : page === 'account' ? my.back() + accountPage() : page === 'permissions' ? my.permissions(db?.user, permissionData, permissionError) : page === 'recovery' ? my.back() + recoveryView.inbox(db?.user, recoveryData, { error: recoveryError, loading: recoveryLoading }) : page === 'images' ? my.back() + imagePage({ user: db?.user, data: imageData, busy: imageBusy, progress: imageProgress, error: imageError, saved: imageSaved }) : page === 'logs' ? my.logs(db?.user, auditData, { query: auditQuery, result: auditResult, from: auditFrom, to: auditTo, error: auditError, loading: auditLoading, exporting: auditExportBusy, retention: retentionPanel() }) : recipePage()}</main><footer class="footer"><span>一餐一饭，都是生活的小事。</span><span>${icon('leaf')}把好味道分享给彼此 · v${APP_VERSION}</span></footer></div>${nav(true)}`;
   if (['recipes', 'favorites'].includes(page)) renderResults();
 }
 
 function syncBar() {
-  return `${db?.cacheWarning ? '<div class="sync-warning">服务器数据已保存，但手机离线缓存未能更新。请释放存储空间或允许网站保存数据。</div>' : ''}<div class="sync-bar"><span>${icon((db?.readOnly || navigator.onLine === false) ? 'wifi' : 'cloud')}${(db?.readOnly || navigator.onLine === false) ? '离线预览 · 修改需要联网' : `已登录：${esc(db?.user?.displayName || '')} · ${roleName(db?.user)}`}</span><div><button class="text-button" data-action="sync">同步菜谱</button><button class="text-button" data-action="logout">退出</button></div></div>${db?.conflicts.length ? `<div class="sync-warning">检测到同时编辑的版本，内容均已保留。<button class="text-button" data-action="history" data-id="${esc(db.conflicts[0])}">查看历史版本</button></div>` : ''}`;
+  return `${db?.cacheWarning ? '<div class="sync-warning">手机本机存储暂时不可用，未同步内容请勿清理。请释放存储空间或允许网站保存数据。</div>' : ''}<div class="sync-bar"><span>${icon((db?.readOnly || navigator.onLine === false) ? 'wifi' : 'cloud')}${(db?.readOnly || navigator.onLine === false) ? '离线预览 · 修改需要联网' : `已登录：${esc(db?.user?.displayName || '')} · ${roleName(db?.user)}`}</span><div><button class="text-button" data-action="sync">同步菜谱</button><button class="text-button" data-action="logout">退出</button></div></div>${queueNotice()}${db?.conflicts.length ? `<div class="sync-warning">检测到同时编辑的版本，内容均已保留。<button class="text-button" data-action="history" data-id="${esc(db.conflicts[0])}">查看历史版本</button></div>` : ''}`;
 }
 
+function detailSyncStatus(id) {
+  const jobs = db?.syncJobs.filter(job => job.id === id) || [];
+  return jobs.length ? `${jobs.some(job => job.status === 'failed') ? '同步未完成，修改保留在本机。' : '已保存在本机，正在后台同步。'}<button class="text-button" data-action="navigate" data-page="sync">查看同步状态</button>` : '已同步到服务器';
+}
+function queueNotice() {
+  const jobs = db?.syncJobs || [], failed = jobs.filter(job => job.status === 'failed').length;
+  return jobs.length ? `<div class="sync-warning" role="status">${failed ? `${failed} 项同步失败，内容仍在本机` : `${jobs.length} 项修改已保存在本机，后台同步中`}<button class="text-button" data-action="navigate" data-page="sync">查看后台同步</button></div>` : '';
+}
+function syncPage() {
+  const jobs = db?.syncJobs || [];
+  return `${my.back()}<div class="section-head"><h1 class="page-title">后台同步</h1><button class="button ghost" data-action="retry-sync">立即重试</button></div><p class="page-lead">操作会先保存在此设备，再上传到服务器。网络恢复后自动重试；关闭页面后会暂停，下次打开并登录原账号继续。同步完成前请勿清理网站数据。</p><section class="panel version-list">${jobs.map(job => `<article><h2>${esc(job.title)}</h2><p>${job.kind === 'recipe' ? '保存菜谱' : job.value.favorite ? '收藏' : '取消收藏'} · ${job.status === 'failed' ? '需要处理' : job.status === 'sending' ? '正在同步' : '等待同步'}</p>${job.error ? `<p class="small-note">${esc(job.error)}</p>` : ''}${job.status === 'failed' ? `<div class="management-actions">${job.recipe ? `<button class="button ghost" data-action="copy-sync" data-token="${esc(job.token)}">另存为新菜</button>` : ''}<button class="button ghost" data-action="discard-sync" data-token="${esc(job.token)}">放弃本机修改</button></div>` : ''}</article>`).join('') || '<p class="empty-management">所有修改已同步完成。</p>'}</section>`;
+}
+function updateQueueView() {
+  if (!db) return;
+  const signature = items => items.map(item => `${item.id}:${item.updatedAt}:${item.favorite}`).join('|');
+  const before = signature(recipes); recipes = db.current();
+  if ($('#favorite-count')) $('#favorite-count').textContent = String(recipes.filter(item => item.favorite).length);
+  if ($('#detail-sync-status')) $('#detail-sync-status').innerHTML = detailSyncStatus(detailId);
+  if ($('#sync-status')) $('#sync-status').innerHTML = syncBar();
+  if (before !== signature(recipes) && ['recipes', 'favorites'].includes(page) && $('#results')) renderResults();
+  if (page === 'sync') $('#main').innerHTML = syncPage();
+  for (const button of document.querySelectorAll('[data-action="favorite"]')) {
+    const selected = !!findRecipe(button.dataset.id)?.favorite;
+    button.classList.toggle('selected', selected); button.setAttribute('aria-pressed', String(selected));
+    button.setAttribute('aria-label', `${selected ? '取消收藏' : '收藏'} ${findRecipe(button.dataset.id)?.title || ''}`);
+  }
+}
 function showLogin(message = '登录查看所有共享菜谱，收藏夹只记录你喜欢的菜。', mode = 'login') {
   $('#app').inert = true; $('#modal-root').inert = true;
   const register = mode === 'register';
@@ -249,7 +286,7 @@ async function login(form) {
     if (editor && editor.userId !== db.user?.id) { saveDraftNow(); clearEditorMemory(); }
     resetBackup(); imageStop = true; imageData = null;
     permissionData = null; auditData = null; recoveryData = null; recoveryError = ''; auditQuery = ''; auditResult = ''; auditFrom = ''; auditTo = '';
-    if (['permissions', 'logs', 'recovery', 'images', 'trash', 'drafts'].includes(page)) page = 'my';
+    if (['permissions', 'logs', 'recovery', 'images', 'trash', 'drafts', 'sync'].includes(page)) page = 'my';
     channel?.postMessage({ type: 'account-changed', userId: db.user.id });
     await refresh();
     $('#access-password').value = ''; $('#auth-root').innerHTML = '';
@@ -271,7 +308,7 @@ function recipePage() {
   const favoriteCount = recipes.filter(item => item.favorite).length;
   const categories = ['全部', ...new Set([...CATEGORIES.filter(item => recipes.some(recipe => recipe.category === item)), ...recipes.map(item => item.category)])];
   if (!categories.includes(category)) category = '全部';
-  return `<section class="hero"><div class="hero-content"><p class="eyebrow">A LITTLE TASTE OF HOME</p><h1>把喜欢的味道，<br>留在自己的厨房。</h1><p class="hero-copy">记下一道拿手菜，也记下生活的滋味。<br>下次想吃时，就翻开这本小小的菜谱。</p><div class="stats"><span class="stat"><strong>${recipes.length}</strong>道菜谱</span><span class="stat"><strong>${favoriteCount}</strong>道收藏</span><span class="stat"><strong>${new Set(recipes.map(item => item.category)).size}</strong>个分类</span></div></div><div class="hero-art">${heroArt}</div></section><section aria-label="菜谱列表"><div class="section-head"><div class="section-heading"><h2>${page === 'favorites' ? '我的收藏夹' : '共享菜谱'}</h2><span class="count" id="result-count">${recipes.length} 道</span></div>${db?.canEdit ? `<button class="button primary" data-action="new">${icon("plus")}记一道新菜</button>` : `<button class="button ghost" data-action="navigate" data-page="permissions">申请编辑权限</button>`}</div><div class="toolbar"><label class="search-box">${icon('search')}<input id="search" type="search" enterkeyhint="search" autocomplete="off" placeholder="搜菜名、食材或心得…" aria-label="搜索菜谱" value="${esc(query)}"></label><select id="sort" class="sort-select" aria-label="菜谱排序"><option value="updated" ${sort === 'updated' ? 'selected' : ''}>最近更新</option><option value="name" ${sort === 'name' ? 'selected' : ''}>菜名排序</option></select></div><div class="chips" role="group" aria-label="按分类筛选">${categories.map(item => `<button class="chip ${item === category ? 'active' : ''}" aria-pressed="${item === category}" data-action="category" data-category="${esc(item)}">${esc(item)}</button>`).join('')}</div><div id="results"></div><aside class="tip-card"><span class="tip-icon">${icon('leaf')}</span><div><h3>好味道，藏在那些小心得里</h3><p>“出锅前再加一勺醋”“妈妈说要小火慢炖”——把这些也一起记下来。</p></div></aside></section>`;
+  return `<section class="hero"><div class="hero-content"><p class="eyebrow">A LITTLE TASTE OF HOME</p><h1>把喜欢的味道，<br>留在自己的厨房。</h1><p class="hero-copy">记下一道拿手菜，也记下生活的滋味。<br>下次想吃时，就翻开这本小小的菜谱。</p><div class="stats"><span class="stat"><strong>${recipes.length}</strong>道菜谱</span><span class="stat"><strong id="favorite-count">${favoriteCount}</strong>道收藏</span><span class="stat"><strong>${new Set(recipes.map(item => item.category)).size}</strong>个分类</span></div></div><div class="hero-art">${heroArt}</div></section><section aria-label="菜谱列表"><div class="section-head"><div class="section-heading"><h2>${page === 'favorites' ? '我的收藏夹' : '共享菜谱'}</h2><span class="count" id="result-count">${recipes.length} 道</span></div>${db?.canEdit ? `<button class="button primary" data-action="new">${icon("plus")}记一道新菜</button>` : `<button class="button ghost" data-action="navigate" data-page="permissions">申请编辑权限</button>`}</div><div class="toolbar"><label class="search-box">${icon('search')}<input id="search" type="search" enterkeyhint="search" autocomplete="off" placeholder="搜菜名、食材或心得…" aria-label="搜索菜谱" value="${esc(query)}"></label><select id="sort" class="sort-select" aria-label="菜谱排序"><option value="updated" ${sort === 'updated' ? 'selected' : ''}>最近更新</option><option value="name" ${sort === 'name' ? 'selected' : ''}>菜名排序</option></select></div><div class="chips" role="group" aria-label="按分类筛选">${categories.map(item => `<button class="chip ${item === category ? 'active' : ''}" aria-pressed="${item === category}" data-action="category" data-category="${esc(item)}">${esc(item)}</button>`).join('')}</div><div id="results"></div><aside class="tip-card"><span class="tip-icon">${icon('leaf')}</span><div><h3>好味道，藏在那些小心得里</h3><p>“出锅前再加一勺醋”“妈妈说要小火慢炖”——把这些也一起记下来。</p></div></aside></section>`;
 }
 
 function renderResults() {
@@ -292,7 +329,7 @@ function emptyState() {
 }
 
 function backupPage() {
-  return `<h1 class="page-title">给好味道，留一份备份。</h1><p class="page-lead">菜谱和照片已保存到服务器。也可以导出一份备份，<br>把厨房记忆留在自己的“文件”里。</p><div class="backup-grid"><section class="panel">${backupExportPanel({ busy: backupBusy, error: backupError, prepared: preparedBackup?.userId === db?.user?.id ? preparedBackup : null, lastBackup, esc, icon })}</section><section class="panel"><div class="panel-icon orange">${icon('upload')}</div><h2>恢复一份备份</h2><p>支持峰味和旧版拾味的备份。确认后更新共享菜谱，相同菜谱保留较新版本。收藏只加入当前账号，保留现有收藏。</p>${db?.canEdit ? `<button class="button ghost" data-action="choose-import">${icon("upload")}选择备份文件</button><input id="import-file" type="file" accept=".json,application/json" hidden><p class="small-note">保留现有菜谱 · 每份最多 50 MiB、10000 道 · 分卷请逐份导入</p>${pendingImport ? importSummary() : ""}` : `<p class="permission-note">导入备份需要编辑权限。</p><button class="button ghost" data-action="navigate" data-page="permissions">申请编辑权限</button>`}</section></div>${fullBackupPanel({ user: db?.user, busy: fullBackupBusy, progress: fullBackupProgress, error: fullBackupError, prepared: fullBackupPrepared?.userId === db?.user?.id ? fullBackupPrepared : null, esc })}${legacyCount && db?.canEdit ? `<section class="panel migration-panel"><h2>迁移本机的旧菜谱</h2><p>检测到这个网址下原先保存的 ${legacyCount} 道菜谱。确认上传后，它们会保存在服务器；本机原数据仍保留。</p><button class="button primary" data-action="migrate">上传本机旧菜谱</button></section>` : ''}<section class="info-panel"><h2>共享菜谱，收藏分开。</h2><div class="info-row">${icon('lock')}<div><h3>菜谱共享，收藏独立</h3><p>登录后都能查看菜谱；新增、编辑、删除和导入需要管理员授权。收藏只属于当前账号，其他账号不会看到你的收藏状态。</p></div></div><div class="info-row">${icon('phone')}<div><h3>放到 iPhone 桌面，随手翻开</h3><p>Safari → 分享 → 添加到主屏幕。登录后从桌面图标使用。</p></div></div><div class="info-row">${icon('wifi')}<div><h3>${offlineReady ? '离线页面已准备好' : '离线查看'}</h3><p>已同步的菜谱可在离线时查看。新增、编辑、删除和导入需要联网，保存成功后才会同步到服务器。退出登录会清除此设备的服务器缓存。</p></div></div><div class="info-row">${icon('backup')}<div><h3>历史版本与独立备份</h3><p>每次服务器保存都会保留历史版本，可在菜谱详情中恢复最近的版本。服务器存储额度用完时会明确提示失败；仍建议定期导出独立菜谱备份。普通菜谱备份不含账号与全部历史；管理员完整备份可用于全站迁移。</p></div></div></section>`;
+  return `<h1 class="page-title">给好味道，留一份备份。</h1><p class="page-lead">请先完成后台同步，再导出一份备份，<br>把厨房记忆留在自己的“文件”里。</p><div class="backup-grid"><section class="panel">${backupExportPanel({ busy: backupBusy, error: backupError, prepared: preparedBackup?.userId === db?.user?.id ? preparedBackup : null, lastBackup, esc, icon })}</section><section class="panel"><div class="panel-icon orange">${icon('upload')}</div><h2>恢复一份备份</h2><p>支持峰味和旧版拾味的备份。确认后更新共享菜谱，相同菜谱保留较新版本。收藏只加入当前账号，保留现有收藏。</p>${db?.canEdit ? `<button class="button ghost" data-action="choose-import">${icon("upload")}选择备份文件</button><input id="import-file" type="file" accept=".json,application/json" hidden><p class="small-note">保留现有菜谱 · 每份最多 50 MiB、10000 道 · 分卷请逐份导入</p>${pendingImport ? importSummary() : ""}` : `<p class="permission-note">导入备份需要编辑权限。</p><button class="button ghost" data-action="navigate" data-page="permissions">申请编辑权限</button>`}</section></div>${fullBackupPanel({ user: db?.user, busy: fullBackupBusy, progress: fullBackupProgress, error: fullBackupError, prepared: fullBackupPrepared?.userId === db?.user?.id ? fullBackupPrepared : null, esc })}${legacyCount && db?.canEdit ? `<section class="panel migration-panel"><h2>迁移本机的旧菜谱</h2><p>检测到这个网址下原先保存的 ${legacyCount} 道菜谱。确认上传后，它们会保存在服务器；本机原数据仍保留。</p><button class="button primary" data-action="migrate">上传本机旧菜谱</button></section>` : ''}<section class="info-panel"><h2>共享菜谱，收藏分开。</h2><div class="info-row">${icon('lock')}<div><h3>菜谱共享，收藏独立</h3><p>登录后都能查看菜谱；新增、编辑、删除和导入需要管理员授权。收藏只属于当前账号，其他账号不会看到你的收藏状态。</p></div></div><div class="info-row">${icon('phone')}<div><h3>放到 iPhone 桌面，随手翻开</h3><p>Safari → 分享 → 添加到主屏幕。登录后从桌面图标使用。</p></div></div><div class="info-row">${icon('wifi')}<div><h3>${offlineReady ? '离线页面已准备好' : '离线查看'}</h3><p>已同步的菜谱可在离线时查看。新增、编辑、删除和导入需要联网，点击保存先写入本机，再后台上传；未完成任务在下次登录原账号后继续。退出登录会清除此设备的服务器缓存。</p></div></div><div class="info-row">${icon('backup')}<div><h3>历史版本与独立备份</h3><p>每次服务器保存都会保留历史版本，可在菜谱详情中恢复最近的版本。服务器存储额度用完时会明确提示失败；仍建议定期导出独立菜谱备份。普通菜谱备份不含账号与全部历史；管理员完整备份可用于全站迁移。</p></div></div></section>`;
 }
 
 function importSummary() {
@@ -342,7 +379,7 @@ async function closeModal() {
 function showDetail(id) {
   const recipe = findRecipe(id); if (!recipe) return;
   detailId = id; editor = null; cookStep = null;
-  showModal(`<div class="modal-header"><div><h2 id="modal-title" tabindex="-1">菜谱里的好味道</h2><div class="header-label">我的私人菜谱</div></div><button class="icon-button" data-action="close" aria-label="关闭菜谱">${icon('close')}</button></div><div class="modal-scroll"><div class="detail-cover">${recipe.photo ? `<img src="${esc(recipe.photo)}" alt="${esc(recipe.title)}">` : `<div class="card-placeholder">${bowlArt}</div>`}</div><span class="detail-category">${esc(recipe.category)}</span><h3 class="detail-title">${esc(recipe.title)}</h3>${recipe.description ? `<p class="detail-description">${esc(recipe.description)}</p>` : ''}<div class="detail-meta"><span>${icon('clock')}${recipe.minutes ? `约 ${recipe.minutes} 分钟` : '用时随心'}</span><span>${icon('people')}${recipe.servings} 人份</span><span>${icon('book')}${recipe.steps.length} 个步骤</span></div><section class="detail-section"><h3>准备食材</h3>${recipe.ingredients.length ? `<ul class="ingredient-list">${recipe.ingredients.map(item => `<li><span class="ingredient-name">${esc(item.name)}</span><span class="ingredient-amount">${esc(item.amount || '适量')}</span></li>`).join('')}</ul>` : '<p class="no-content">还没有记录食材，可以在编辑里慢慢补上。</p>'}</section><section class="detail-section"><h3>开始下厨</h3>${recipe.steps.length ? `<ol class="detail-steps">${recipe.steps.map((text, index) => `<li><span class="step-number">${index + 1}</span><p>${esc(text)}</p></li>`).join('')}</ol>` : '<p class="no-content">做法还没写，可以先留住菜名，再补上步骤。</p>'}</section>${recipe.notes ? `<section class="detail-section"><h3>我的小心得</h3><div class="notes-block">${esc(recipe.notes)}</div></section>` : ''}<p class="detail-date">记于 ${date(recipe.createdAt)} · 最近更新 ${date(recipe.updatedAt)}</p><button class="text-button" data-action="history" data-id="${esc(id)}">查看历史版本</button></div><div class="modal-footer"><div class="detail-actions"><button class="favorite-button ${recipe.favorite ? 'selected' : ''}" aria-pressed="${recipe.favorite}" data-action="favorite" data-id="${esc(id)}" aria-label="${recipe.favorite ? '取消收藏' : '收藏'}">${icon('heart')}</button>${db?.canEdit ? `<button class="button ghost" data-action="edit" data-id="${esc(id)}">${icon("edit")}编辑</button>` : `<button class="button ghost" data-action="navigate" data-page="permissions">申请编辑</button>`}</div><button class="button primary" data-action="cook" data-id="${esc(id)}" ${recipe.steps.length ? '' : 'disabled'}>跟着做${icon('arrow')}</button></div>`);
+  showModal(`<div class="modal-header"><div><h2 id="modal-title" tabindex="-1">菜谱里的好味道</h2><div class="header-label">我的私人菜谱</div></div><button class="icon-button" data-action="close" aria-label="关闭菜谱">${icon('close')}</button></div><div class="modal-scroll"><div class="detail-cover">${recipe.photo ? `<img src="${esc(recipe.photo)}" alt="${esc(recipe.title)}">` : `<div class="card-placeholder">${bowlArt}</div>`}</div><span class="detail-category">${esc(recipe.category)}</span><h3 class="detail-title">${esc(recipe.title)}</h3>${recipe.description ? `<p class="detail-description">${esc(recipe.description)}</p>` : ''}<div class="detail-meta"><span>${icon('clock')}${recipe.minutes ? `约 ${recipe.minutes} 分钟` : '用时随心'}</span><span>${icon('people')}${recipe.servings} 人份</span><span>${icon('book')}${recipe.steps.length} 个步骤</span></div><section class="detail-section"><h3>准备食材</h3>${recipe.ingredients.length ? `<ul class="ingredient-list">${recipe.ingredients.map(item => `<li><span class="ingredient-name">${esc(item.name)}</span><span class="ingredient-amount">${esc(item.amount || '适量')}</span></li>`).join('')}</ul>` : '<p class="no-content">还没有记录食材，可以在编辑里慢慢补上。</p>'}</section><section class="detail-section"><h3>开始下厨</h3>${recipe.steps.length ? `<ol class="detail-steps">${recipe.steps.map((text, index) => `<li><span class="step-number">${index + 1}</span><p>${esc(text)}</p></li>`).join('')}</ol>` : '<p class="no-content">做法还没写，可以先留住菜名，再补上步骤。</p>'}</section>${recipe.notes ? `<section class="detail-section"><h3>我的小心得</h3><div class="notes-block">${esc(recipe.notes)}</div></section>` : ''}<p class="detail-date">记于 ${date(recipe.createdAt)} · 最近更新 ${date(recipe.updatedAt)}</p><p id="detail-sync-status" class="small-note" role="status">${detailSyncStatus(id)}</p><button class="text-button" data-action="history" data-id="${esc(id)}">查看历史版本</button></div><div class="modal-footer"><div class="detail-actions"><button class="favorite-button ${recipe.favorite ? 'selected' : ''}" aria-pressed="${recipe.favorite}" data-action="favorite" data-id="${esc(id)}" aria-label="${recipe.favorite ? '取消收藏' : '收藏'}">${icon('heart')}</button>${db?.canEdit ? `<button class="button ghost" data-action="edit" data-id="${esc(id)}">${icon("edit")}编辑</button>` : `<button class="button ghost" data-action="navigate" data-page="permissions">申请编辑</button>`}</div><button class="button primary" data-action="cook" data-id="${esc(id)}" ${recipe.steps.length ? '' : 'disabled'}>跟着做${icon('arrow')}</button></div>`);
 }
 
 function blankRecipe() {
@@ -398,10 +435,10 @@ async function saveRecipe() {
     const recipe = validateRecipe({ ...editor.recipe, title: fields.get('title').trim(), description: fields.get('description').trim(), category: fields.get('category').trim() || '其他', minutes: Number(fields.get('minutes') || 0), servings: Number(fields.get('servings')), ingredients: ingredients.filter(item => item.name), steps: [...document.querySelectorAll('.step-input')].map(input => input.value.trim()).filter(Boolean), notes: fields.get('notes').trim(), updatedAt: new Date().toISOString() });
     saveDraftNow();
     editor.saving = true; form.inert = true; button.disabled = true; button.textContent = '正在保存…';
-    await db.put(recipe, { baseRevision: editor.baseRevision });
+    await db.queuePut(recipe, { baseRevision: editor.baseRevision });
     removeDraft(editor.userId, recipe.id);
     editor.dirty = false; editor.saving = false;
-    await changed(); await closeModal(); showDetail(recipe.id); toast('已保存到服务器');
+    await changed(); await closeModal(); showDetail(recipe.id); toast('已保存到本机，正在后台同步');
     navigator.storage?.persist?.().catch(() => {});
   } catch (error) {
     if (editor) editor.saving = false;
@@ -413,10 +450,9 @@ async function saveRecipe() {
 
 async function favorite(id) {
   const recipe = findRecipe(id); if (!recipe) return;
-  await db.setFavorite(id, !recipe.favorite);
-  await changed();
-  if (detailId === id) showDetail(id);
-  toast(recipe.favorite ? '已移出收藏夹' : '已收进收藏夹');
+  await db.queueFavorite(id, !recipe.favorite);
+  updateQueueView();
+  toast(recipe.favorite ? '已取消收藏，后台同步中' : '已收藏，后台同步中');
 }
 
 async function deleteRecipe(id) {
@@ -785,6 +821,8 @@ async function handleAction(button) {
       const all = action === 'logout-all';
       if (all && !await ask('退出所有设备？', '当前设备也会退出，所有设备需要重新登录。', '全部退出')) break;
       if (readDrafts().length && !await ask('退出并清理本机草稿？', '此设备未提交的草稿和离线缓存将被清除。需要保留的内容请先保存到服务器。', '退出并清理', true)) break;
+      const queued = db.syncJobs.length;
+      if (queued && !await ask('仍有待同步修改，退出账号？', `${queued} 项后台任务会保留在此设备，重新登录当前账号后继续。同步完成前请勿清理网站数据。`, '退出账号')) break;
       const owner = db.user?.id;
       const cleared = await db.logout(all);
       let draftsCleared = true; try { draftStore?.clear(owner); } catch { draftsCleared = false; }
@@ -792,7 +830,7 @@ async function handleAction(button) {
       permissionData = null; auditData = null; recoveryData = null; trashData = null; retentionData = null; recoveryError = ''; auditQuery = ''; auditResult = ''; auditFrom = ''; auditTo = '';
       recipes = []; pendingImport = null; historyItems = []; page = 'recipes'; legacyCount = 0;
       channel?.postMessage({ type: 'account-changed', userId: null }); render();
-      showLogin(!cleared || !draftsCleared ? '已退出登录。部分本机数据未能清理，可在浏览器设置中清除此网站数据。' : db.pendingLogout ? '已退出并清除此设备数据。服务器会话将在网络可用时完成注销。' : all ? '已退出所有设备，请重新登录。' : '已退出登录，此设备缓存和草稿已清除。'); break;
+      showLogin(queued ? '已退出登录。后台任务保留在本机，请登录原账号继续同步。' : !cleared || !draftsCleared ? '已退出登录。部分本机数据未能清理，可在浏览器设置中清除此网站数据。' : db.pendingLogout ? '已退出并清除此设备数据。服务器会话将在网络可用时完成注销。' : all ? '已退出所有设备，请重新登录。' : '已退出登录，此设备缓存和草稿已清除。'); break;
     }
     case 'history': await showHistory(id); break;
     case 'restore-version': await restoreVersion(Number(button.dataset.index)); break;
@@ -816,6 +854,18 @@ async function handleAction(button) {
     case 'new': showEditor(); break;
     case 'resume-draft': { const draft = readDrafts().find(item => item.recipe.id === id); if (draft) showEditor(draft.isNew ? undefined : id, draft); break; }
     case 'discard-draft': if (await ask('删除这份草稿？', '只删除此设备未提交的内容，服务器菜谱保持原样。', '删除草稿', true)) { removeDraft(db.user.id, id); render(); } break;
+    case 'retry-sync': db.retrySync().catch(error => toast(errorText(error))); toast('正在重试后台同步'); break;
+    case 'discard-sync': {
+      if (await ask('放弃本机修改？', '将移除此菜谱尚未完成的本机任务并重新读取服务器版本。其他设备已保存的内容保持不变。', '放弃修改', true)) { await db.discardSync(button.dataset.token); await refresh(); }
+      break;
+    }
+    case 'copy-sync': {
+      const job = db.syncJobs.find(item => item.token === button.dataset.token); if (!job?.recipe) break;
+      if (!await ask('另存为新菜？', '保留服务器上的原菜谱，将这份本机内容另存为一条新菜谱。', '另存为新菜')) break;
+      const recipe = { ...job.recipe, id: createId(), createdAt: new Date().toISOString(), updatedAt: new Date().toISOString() };
+      await db.queuePut(recipe, { baseRevision: null }); await db.discardSync(job.token); await changed(); showDetail(recipe.id); break;
+    }
+    case 'purge-trash': button.disabled = true; try { await purgeTrash(id); } finally { button.disabled = false; } break;
     case 'reload-trash': await loadTrash(); break;
     case 'load-more-trash': await loadTrash(true); break;
     case 'restore-trash': button.disabled = true; try { await restoreTrash(id); } finally { button.disabled = false; } break;
@@ -825,7 +875,7 @@ async function handleAction(button) {
     case 'detail': showDetail(id); db.activity('recipe.view', id).catch(() => {}); break;
     case 'edit': showEditor(id); break;
     case 'close': await closeModal(); break;
-    case 'favorite': button.disabled = true; try { await favorite(id); } finally { button.disabled = false; } break;
+    case 'favorite': await favorite(id); break;
     case 'category': category = button.dataset.category; render(); break;
     case 'reset-filters': page = 'recipes'; query = ''; category = '全部'; render(); break;
     case 'sample': button.disabled = true; try { await addSample(); } finally { button.disabled = false; } break;
@@ -910,7 +960,9 @@ document.addEventListener('keydown', event => {
 });
 window.addEventListener('pagehide', saveDraftNow);
 window.addEventListener('beforeunload', event => { saveDraftNow(); if (editor?.dirty || imageBusy || backupBusy || fullBackupBusy) { event.preventDefault(); event.returnValue = ''; } });
-window.addEventListener('online', () => { db?.completeLogout().catch(() => {}); toast('网络已连接，请同步服务器菜谱后再修改。'); if (db && !editor && !$('#modal-root').hasChildNodes() && !$('#auth-root').hasChildNodes()) refresh().catch(error => toast(errorText(error))); });
+window.addEventListener('fengwei:queue-changed', updateQueueView);
+window.addEventListener('fengwei:sync-complete', () => channel?.postMessage('changed'));
+window.addEventListener('online', () => { db?.resumeSync().catch(() => {}); db?.completeLogout().catch(() => {}); toast('网络已连接，正在恢复后台同步。'); if (db && !editor && !$('#modal-root').hasChildNodes() && !$('#auth-root').hasChildNodes()) refresh().catch(error => toast(errorText(error))); });
 window.addEventListener('offline', () => toast('已离线，已同步的菜谱仍可查看；修改需要联网保存。'));
 window.addEventListener('fengwei:permissions-changed', () => { permissionData = null; render(); });
 window.addEventListener('fengwei:login-required', async () => {
@@ -952,7 +1004,7 @@ channel?.addEventListener('message', async event => {
 });
 document.addEventListener('visibilitychange', async () => {
   if (document.visibilityState === 'hidden') saveDraftNow();
-  if (document.visibilityState === 'visible') { workerRegistration?.update().catch(() => {}); db?.completeLogout().catch(() => {}); }
+  if (document.visibilityState === 'visible') { workerRegistration?.update().catch(() => {}); db?.resumeSync().catch(() => {}); db?.completeLogout().catch(() => {}); }
   if (document.visibilityState === 'visible' && db?.authenticated && navigator.onLine !== false && !db.readOnly) {
     try { const role = db.user?.role; await db.refreshUser(); if (role !== db.user?.role) { render(); if (page === 'permissions') await loadPermissions(); toast(`账号权限已更新：${roleName(db.user)}`); } } catch {}
   }

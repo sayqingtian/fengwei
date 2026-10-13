@@ -146,7 +146,14 @@ export async function openLocalStore() {
     remove: id => operation('recipes', 'readwrite', store => store.delete(id)),
     import: recipes => { const valid = recipes.map(validateRecipe); return operation('recipes', 'readwrite', store => valid.forEach(item => store.put(item))); },
     setting: key => operation('settings', 'readonly', (store, set) => { const req = store.get(key); req.onsuccess = () => set(req.result); }),
-    setSetting: (key, value) => operation('settings', 'readwrite', store => store.put(value, key))
+    setSetting: (key, value) => operation('settings', 'readwrite', store => store.put(value, key)),
+    updateSetting: (key, update) => operation('settings', 'readwrite', (store, set) => {
+      const request = store.get(key);
+      request.onsuccess = () => {
+        try { const value = update(request.result); store.put(value, key); set(value); }
+        catch { store.transaction.abort(); }
+      };
+    })
   };
 }
 

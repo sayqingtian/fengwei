@@ -1,7 +1,7 @@
 import { createHash } from 'node:crypto';
 import { auditCutoff, retainedRecord } from './audit-retention.mjs';
 
-const prefixes = ['recipes/', 'photos/', 'private/users/', 'private/usernames/', 'private/registrations/', 'private/password-changes/', 'private/password-heads/', 'private/deleted-users/', 'private/permissions/', 'private/permission-requests/', 'private/favorites/', 'private/password-recovery-requests/', 'private/password-recovery-decisions/', 'private/photo-optimizations/', 'private/photo-optimized/', 'private/audit/', 'private/audit-index/', 'private/audit-canonical/', 'private/audit-pending/'];
+const prefixes = ['recipes/', 'photos/', 'private/users/', 'private/usernames/', 'private/registrations/', 'private/password-changes/', 'private/password-heads/', 'private/deleted-users/', 'private/permissions/', 'private/permission-requests/', 'private/favorites/', 'private/password-recovery-requests/', 'private/password-recovery-decisions/', 'private/purged-recipes/', 'private/photo-optimizations/', 'private/photo-optimized/', 'private/audit/', 'private/audit-index/', 'private/audit-canonical/', 'private/audit-pending/'];
 export const backupKey = key => typeof key === 'string' && key.length < 512 && /^[a-zA-Z0-9_./|:-]+$/.test(key) && !key.split('/').some(part => part === '..' || part === '.' || !part) && (prefixes.some(prefix => key.startsWith(prefix)) || key === 'private/photo-cache-version.json') && (key.startsWith('photos/') ? /^photos\/[a-f0-9]{64}\.(bin|txt)$/.test(key) : key.endsWith('.json'));
 export const sha256 = bytes => createHash('sha256').update(bytes).digest('hex');
 export function canonical(value) {

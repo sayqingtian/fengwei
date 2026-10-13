@@ -316,6 +316,18 @@ export function createApi({ database, password }) {
         action = 'recipe.history'; target = history[0]?.recipe?.title || id; await record('success');
         return reply({ userId: user.id, items: history.map(event => publicEvent(event, favorites.value(event, user.id, states))) });
       }
+      if (route.startsWith('trash/') && method === 'DELETE') {
+        action = 'recipe.purge';
+        if (!user.canEdit) fail(403, 'EDIT_PERMISSION_REQUIRED', '需要编辑权限才能彻底删除菜谱。');
+        const id = decodeURIComponent(route.slice(6)); target = id;
+        if (!id || id.length > 128 || id.includes('/')) fail(400, 'INVALID_ID', '菜谱编号不正确。');
+        const data = await body(request, 4096); mutation(data); operationId = data.mutationId;
+        if (data.expectedUserId !== user.id) fail(409, 'ACCOUNT_CHANGED', '账号已切换，请重新同步。');
+        const result = await database.purge(id, data.baseRevision, receipt());
+        if (result.auditEntry) operationId = result.auditEntry.operationId;
+        if (result.complete) await record('success');
+        return reply({ userId: user.id, complete: result.complete });
+      }
       if (route.startsWith('favorite/') && method === 'PUT') {
         action = 'recipe.favorite';
         const id = decodeURIComponent(route.slice(9));

@@ -1,4 +1,5 @@
 import { createId, validateRecipe } from './store.js';
+import { createOutbox } from './outbox.js';
 import { PHOTO_PACKET_TYPE, packPhotos, unpackPhotos, splitPhoto, joinPhoto } from './photo-wire.js';
 
 const CACHE_KEY = 'fengwei-server-cache-v2';
@@ -28,7 +29,7 @@ export async function createRemoteStore(local) {
   const photoCache = new Map();
   for (const recipe of records) { const key = hashes[recipe.id]; if (key && recipe.photo) photoCache.set(key, recipe.photo); }
   let cacheWarning = !local;
-  let accountEpoch = 0, syncing = null;
+  let accountEpoch = 0, syncing = null, outbox = null;
   let dataEpoch = 0, mutationTail = Promise.resolve();
   function mutate(work) {
     const epoch = accountEpoch;
@@ -44,6 +45,7 @@ export async function createRemoteStore(local) {
   let batchPhotos = true, photoReferences = false, binaryPhotos = false;
   const apiBase = new URL('./api/', import.meta.url);
   function resetMemory() {
+    outbox?.close(); outbox = null;
     accountEpoch++; photoLoads.clear(); photoReferences = false; binaryPhotos = false;
     snapshot = null; records = []; revisions = Object.create(null); hashes = Object.create(null);
     conflicts = []; photoCache.clear(); user = null; authenticated = false; offline = false;
@@ -61,6 +63,7 @@ export async function createRemoteStore(local) {
     if (!nextUser?.id || !nextUser.displayName) throw new ApiError('服务器账号接口未就绪，请部署完整新版。', 503, 'INVALID_ACCOUNT');
     if (user?.id !== nextUser.id) await forget();
     user = nextUser;
+    await openOutbox();
   }
   async function request(path, { method = 'GET', value, binary, receivePhotos = false, retrySafe = false } = {}) {
     const epoch = accountEpoch;
@@ -214,8 +217,50 @@ export async function createRemoteStore(local) {
     catch (error) { if (!uncertain(error)) { delete pending[id]; await remember(); } throw error; }
     delete pending[id]; await remember();
   }
-  const write = (...args) => mutate(() => writeNow(...args));
-  const setFavorite = (...args) => mutate(() => setFavoriteNow(...args));
+  function notifyQueue() { globalThis.dispatchEvent?.(new Event('fengwei:queue-changed')); }
+  async function openOutbox() {
+    if (outbox || !user?.id) return;
+    const owner = user.id;
+    outbox = createOutbox({ local, owner, changed: notifyQueue, committed: () => globalThis.dispatchEvent?.(new Event('fengwei:sync-complete')),
+      ready: () => authenticated && user?.id === owner && !pendingLogout && globalThis.navigator?.onLine !== false,
+      send: job => mutate(async () => {
+        if (user?.id !== owner) throw new ApiError('请登录原账号继续同步。', 409, 'ACCOUNT_CHANGED');
+        if (job.kind === 'recipe') return sendWrite(job.id, job);
+        const data = await request(`favorite/${encodeURIComponent(job.id)}`, { method: 'PUT', value: job.value, retrySafe: true });
+        await sameAccount(data);
+        records = records.map(recipe => recipe.id === job.id ? { ...recipe, favorite: data.favorite } : recipe);
+        await persist();
+      }),
+    });
+    await outbox.reload().catch(() => { cacheWarning = true; });
+  }
+  function current() {
+    const result = new Map(records.map(recipe => [recipe.id, recipe]));
+    for (const job of outbox?.jobs || []) {
+      if (job.kind === 'recipe') result.set(job.id, { ...job.recipe, favorite: result.get(job.id)?.favorite ?? job.recipe.favorite });
+      else if (result.has(job.id)) result.set(job.id, { ...result.get(job.id), favorite: job.value.favorite });
+    }
+    return [...result.values()];
+  }
+  function localRevision(id) {
+    const job = outbox?.jobs.filter(item => item.id === id && item.kind === 'recipe').at(-1);
+    return job ? `local:${job.token}` : revisions[id] || null;
+  }
+  async function enqueue(kind, id, recipe, favorite, options = {}) {
+    if (!authenticated || !user) throw new ApiError('请先登录后保存。', 401, 'LOGIN_REQUIRED');
+    if (kind === 'recipe' && !user.canEdit) throw new ApiError('请先申请编辑权限。', 403, 'EDIT_PERMISSION_REQUIRED');
+    const owner = user.id; await openOutbox();
+    const token = createId(), valid = recipe ? validateRecipe(recipe) : null;
+    const baseRevision = Object.hasOwn(options, 'baseRevision') ? options.baseRevision : localRevision(id);
+    const value = { expectedUserId: owner, mutationId: token, ...(valid ? { recipe: valid, baseRevision } : { favorite: !!favorite }) };
+    await outbox.enqueue({ token, kind, id, title: valid?.title || current().find(item => item.id === id)?.title || '菜谱收藏', value, recipe: valid, method: 'PUT', binary: !!(binaryPhotos && valid?.photo) });
+    if (owner !== user?.id) throw new ApiError('账号已切换，内容保留在原账号的同步任务中。', 409, 'ACCOUNT_CHANGED');
+  }
+  function requireSettled(id) {
+    if (outbox?.jobs.some(job => !id || job.id === id)) throw new ApiError('本机还有待同步或失败的修改，请先在“后台同步”中处理。', 409, 'PENDING_SYNC');
+  }
+  const write = (...args) => { requireSettled(args[0]); return mutate(() => writeNow(...args)); };
+  const setFavorite = (...args) => { requireSettled(args[0]); return mutate(() => setFavoriteNow(...args)); };
   async function setFavoriteNow(id, favorite) {
     ensureOnline();
     const data = await request(`favorite/${encodeURIComponent(id)}`, { method: 'PUT', value: { favorite, expectedUserId: user?.id, mutationId: createId() } });
@@ -258,15 +303,16 @@ export async function createRemoteStore(local) {
         cursor = data.cursor;
       } while (cursor);
       records = next; revisions = newRevisions; hashes = newHashes; conflicts = newConflicts;
-      offline = false; authenticated = true; await persist(); return records;
+      offline = false; authenticated = true; await persist(); await outbox?.reload(); if (local) await outbox?.authorize(); outbox?.drain().catch(() => {}); return current();
     } catch (error) {
       if (error.status === 401) throw error;
       if (job.epoch !== accountEpoch) throw new ApiError('账号已切换，本次同步已取消。', 409, 'ACCOUNT_CHANGED');
       if (version !== dataEpoch) return synchronize(job);
-      if (!job.requireOnline && (error.code === 'NETWORK' || error.code === 'STORAGE_UNAVAILABLE') && snapshot?.user && Date.now() - snapshot.authenticatedAt < CACHE_AGE) { offline = true; authenticated = true; return records; }
+      if (!job.requireOnline && (error.code === 'NETWORK' || error.code === 'STORAGE_UNAVAILABLE') && snapshot?.user && Date.now() - snapshot.authenticatedAt < CACHE_AGE) { offline = true; authenticated = true; await openOutbox(); return current(); }
       throw error;
     }
   }
+  await openOutbox();
   return {
     get user() { return user; },
     get readOnly() { return offline; },
@@ -276,8 +322,14 @@ export async function createRemoteStore(local) {
     get cacheWarning() { return cacheWarning; },
     get pendingLogout() { return !!pendingLogout; },
     completeLogout: finishLogout,
-    current: () => records.slice(),
-    revision: id => revisions[id] || null,
+    current,
+    revision: localRevision,
+    get syncJobs() { return outbox?.jobs || []; },
+    queuePut: (recipe, options) => enqueue('recipe', recipe.id, recipe, null, options),
+    queueFavorite: (id, favorite) => enqueue('favorite', id, null, favorite),
+    async retrySync() { await openOutbox(); await outbox?.retry(); },
+    async resumeSync() { await openOutbox(); await outbox?.reload(); await outbox?.drain(); },
+    async discardSync(token) { await outbox?.discard(token); },
     all() {
       if (syncing?.epoch === accountEpoch) return syncing.promise;
       const job = { epoch: accountEpoch };
@@ -285,12 +337,14 @@ export async function createRemoteStore(local) {
       return job.promise;
     },
     async fullBackupRequest(action, value) {
+      await outbox?.reload(); requireSettled();
       const expectedUserId = user?.id;
       if (user?.role !== 'admin') throw new ApiError('只有管理员可以生成完整备份。', 403, 'ADMIN_REQUIRED');
       const data = await request(`admin/backup/${action}`, { method: 'POST', value: { ...value, expectedUserId } });
       await sameAccount(data); return data;
     },
     async backupSnapshot() {
+      await outbox?.reload(); requireSettled();
       const epoch = accountEpoch, expectedUserId = user?.id;
       if (!expectedUserId) throw new ApiError('请先登录后生成备份。', 401, 'LOGIN_REQUIRED');
       const checkAccount = () => {
@@ -303,7 +357,7 @@ export async function createRemoteStore(local) {
       const job = { epoch, expectedUserId, requireOnline: true };
       job.promise = synchronize(job).finally(() => { if (syncing === job) syncing = null; }); syncing = job;
       const latest = await job.promise;
-      checkAccount();
+      checkAccount(); await outbox?.reload(); requireSettled();
       return { recipes: structuredClone(latest), userId: expectedUserId, syncedAt: new Date().toISOString() };
     },
     put: (recipe, options) => write(recipe.id, recipe, 'PUT', options),
@@ -372,6 +426,11 @@ export async function createRemoteStore(local) {
     },
     async retention() { const data = await request('admin/audit-retention'); await sameAccount(data); return data.retention; },
     async cleanAudit() { ensureOnline(); return request('maintenance/audit', { method: 'POST', value: {} }); },
+    async purgeRecipe(id, baseRevision, mutationId) {
+      requireSettled(id); ensureOnline();
+      const data = await request(`trash/${encodeURIComponent(id)}`, { method: 'DELETE', value: { baseRevision, mutationId, expectedUserId: user?.id }, retrySafe: true });
+      await sameAccount(data); return data;
+    },
     async trash(cursor = '') { ensureOnline(); const data = await request(`trash?cursor=${encodeURIComponent(cursor)}`); await sameAccount(data); return data; },
     async exportAudit(format, { query = '', result = '', from = '', to = '' } = {}) {
       ensureOnline(); const params = new URLSearchParams({ format, q: query, result, from, to });
