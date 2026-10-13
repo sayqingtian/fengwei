@@ -137,3 +137,35 @@ test('an old sync response cannot replace the account or favorites after logout 
   assert.equal(client.user.id, other.id); assert.deepEqual(client.current(), []);
   pause = false; await client.all(); assert.equal(client.current().length, 1); assert.equal(client.user.id, other.id);
 });
+
+test('slow sync cannot roll back a confirmed edit, favorite or deletion in memory or the offline cache', async t => {
+  const f = await fixture(t), originalFetch = globalThis.fetch;
+  t.after(() => { globalThis.fetch = originalFetch; });
+  await f.database.commit({ id: 'sync-race', recipe: recipe('sync-race'), baseRevision: null, mutationId: randomUUID() });
+  let gate = null, online = true;
+  globalThis.fetch = async (url, options = {}) => {
+    if (!online) throw new Error('test offline');
+    const target = new URL(url), path = target.pathname.split('/api/')[1] + target.search;
+    const response = await f.api(new Request(`https://recipes.test/api/${path}`, { ...options, headers: { ...options.headers, Cookie: f.cookie, Origin: 'https://recipes.test' } }));
+    if (gate && path === 'recipes') { const current = gate; gate = null; current.captured(); await current.hold; }
+    return response;
+  };
+  const saved = new Map();
+  const client = await createRemoteStore({ async setting(key) { return saved.get(key); }, async setSetting(key, value) { saved.set(key, structuredClone(value)); } });
+  await client.all();
+  for (const operation of ['edit', 'favorite', 'delete']) {
+    let release, captured;
+    const hold = new Promise(resolve => { release = resolve; }), observed = new Promise(resolve => { captured = resolve; });
+    gate = { hold, captured };
+    const stale = client.all(); await observed;
+    if (operation === 'edit') await client.put({ ...client.current()[0], title: '已确认的新标题' });
+    if (operation === 'favorite') await client.setFavorite('sync-race', true);
+    if (operation === 'delete') await client.remove('sync-race');
+    release(); await stale;
+    const cached = saved.get('fengwei-server-cache-v2').recipes;
+    assert.deepEqual(cached, client.current());
+    if (operation === 'edit') assert.equal(cached[0].title, '已确认的新标题');
+    if (operation === 'favorite') assert.equal(cached[0].favorite, true);
+    if (operation === 'delete') { assert.equal(cached.length, 0); online = false; assert.deepEqual(await client.all(), []); }
+  }
+});

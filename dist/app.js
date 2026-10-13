@@ -4,6 +4,7 @@ import { CATEGORIES, createId, openStore, validateRecipe, filterRecipes, makeBac
 
 const $ = (selector, root = document) => root.querySelector(selector);
 const esc = value => String(value ?? '').replace(/[&<>"']/g, char => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[char]);
+let accountDeletion = null;
 const paths = {
   bowl: '<path d="M3 11h18c-.6 6-4.1 9-9 9s-8.4-3-9-9Z"/><path d="M9 23h6M8 7c-3-3 3-3 0-6M13 7c-3-3 3-3 0-6"/>',
   book: '<path d="M4 3h13a3 3 0 0 1 3 3v15H6a3 3 0 0 1-3-3V6a3 3 0 0 1 1-3Z"/><path d="M7 3v14M3 17h17M11 7h5M11 10h4"/>',
@@ -41,7 +42,7 @@ let editor = null, detailId = null, cookStep = null, pendingImport = null, lastB
 let toastTimer, confirmResolve, restoreFocus, wakeLock = null, offlineReady = false;
 let historyItems = [], legacyCount = 0, registrationId = null, authBusy = false;
 let permissionData = null, permissionError = '', permissionRequestId = createId(), permissionDecision = null;
-let auditData = null, auditQuery = '', auditResult = '', auditError = '', auditLoading = false;
+let auditData = null, auditQuery = '', auditResult = '', auditFrom = '', auditTo = '', auditError = '', auditLoading = false;
 let passwordMutationId = null, passwordBusy = false, auditExportBusy = false;
 let recoveryRequestId = null, recoveryData = null, recoveryError = '', recoveryLoading = false, recoveryDecision = null, recoveryBusy = false;
 const channel = typeof BroadcastChannel !== 'undefined' ? new BroadcastChannel('fengwei-changes') : null;
@@ -59,7 +60,7 @@ function nav(mobile = false) {
 }
 
 function render() {
-  $('#app').innerHTML = `<a class="skip-link" href="#main">跳到菜谱内容</a><div class="shell"><header class="header"><div class="brand"><div class="brand-icon">${icon('bowl')}</div><div><div class="brand-name">峰味</div><div class="brand-caption">共享菜谱，自己的收藏</div></div></div>${nav()}<span class="private-pill">${icon('people')}共享菜谱 · 独立收藏</span></header>${syncBar()}<main id="main">${page === 'my' ? my.overview(db?.user, recipes.filter(item => item.favorite).length, recoveryData?.requests.filter(item => item.status === 'pending').length || 0) : page === 'backup' ? my.back() + backupPage() : page === 'account' ? my.back() + accountPage() : page === 'permissions' ? my.permissions(db?.user, permissionData, permissionError) : page === 'recovery' ? my.back() + recoveryView.inbox(db?.user, recoveryData, { error: recoveryError, loading: recoveryLoading }) : page === 'logs' ? my.logs(db?.user, auditData, { query: auditQuery, result: auditResult, error: auditError, loading: auditLoading, exporting: auditExportBusy }) : recipePage()}</main><footer class="footer"><span>一餐一饭，都是生活的小事。</span><span>${icon('leaf')}把好味道分享给彼此</span></footer></div>${nav(true)}`;
+  $('#app').innerHTML = `<a class="skip-link" href="#main">跳到菜谱内容</a><div class="shell"><header class="header"><div class="brand"><div class="brand-icon">${icon('bowl')}</div><div><div class="brand-name">峰味</div><div class="brand-caption">共享菜谱，自己的收藏</div></div></div>${nav()}<span class="private-pill">${icon('people')}共享菜谱 · 独立收藏</span></header>${syncBar()}<main id="main">${page === 'my' ? my.overview(db?.user, recipes.filter(item => item.favorite).length, recoveryData?.requests.filter(item => item.status === 'pending').length || 0) : page === 'backup' ? my.back() + backupPage() : page === 'account' ? my.back() + accountPage() : page === 'permissions' ? my.permissions(db?.user, permissionData, permissionError) : page === 'recovery' ? my.back() + recoveryView.inbox(db?.user, recoveryData, { error: recoveryError, loading: recoveryLoading }) : page === 'logs' ? my.logs(db?.user, auditData, { query: auditQuery, result: auditResult, from: auditFrom, to: auditTo, error: auditError, loading: auditLoading, exporting: auditExportBusy }) : recipePage()}</main><footer class="footer"><span>一餐一饭，都是生活的小事。</span><span>${icon('leaf')}把好味道分享给彼此</span></footer></div>${nav(true)}`;
   if (['recipes', 'favorites'].includes(page)) renderResults();
 }
 
@@ -108,7 +109,7 @@ async function login(form) {
       await db.register($('#register-name').value.trim(), $('#access-password').value, registrationId);
       page = 'account';
     } else await db.login($('#login-username').value.trim(), $('#access-password').value);
-    permissionData = null; auditData = null; recoveryData = null; recoveryError = ''; auditQuery = ''; auditResult = '';
+    permissionData = null; auditData = null; recoveryData = null; recoveryError = ''; auditQuery = ''; auditResult = ''; auditFrom = ''; auditTo = '';
     if (['permissions', 'logs', 'recovery'].includes(page)) page = 'my';
     channel?.postMessage({ type: 'account-changed', userId: db.user.id });
     await refresh();
@@ -458,11 +459,38 @@ async function submitPermissionDecision(form) {
   } catch (problem) { error.textContent = errorText(problem); error.hidden = false; button.disabled = false; }
 }
 
+function showAccountDeletion(data) {
+  if (db.user?.role !== 'admin') return;
+  const selected = permissionData?.accounts.find(item => item.id === data.user);
+  if (!selected || selected.role === 'admin') return;
+  const normalize = value => value.normalize('NFKC').trim().toLowerCase();
+  const accounts = data.scope === 'duplicates' ? permissionData.accounts.filter(item => item.role !== 'admin' && normalize(item.displayName) === normalize(selected.displayName)) : [selected];
+  accountDeletion = { accounts: accounts.map(({ id, displayName }) => ({ id, displayName })), mutationId: createId() };
+  showModal(`<div class="modal-header"><h2 id="modal-title" tabindex="-1">删除 ${accounts.length} 个账号</h2><button class="icon-button" data-action="close" aria-label="关闭删除账号">${icon('close')}</button></div><div class="modal-scroll"><p class="page-lead">下列账号将从账号列表移除，并停止登录和访问服务器。共享菜谱和历史操作日志会保留。</p><div class="management-list">${accounts.map(item => `<article class="request-card"><strong>${esc(item.displayName)}</strong><p class="small-note account-id">${esc(item.id)}</p>${item.createdAt ? `<p class="small-note">注册时间：${esc(new Date(item.createdAt).toLocaleString('zh-CN', { timeZone: 'Asia/Shanghai', hour12: false }))}</p>` : ''}</article>`).join('')}</div><form id="account-delete-form"><p id="account-delete-error" class="form-error" role="alert" hidden></p><div class="management-actions"><button type="button" class="button ghost" data-action="close">取消</button><button type="submit" class="button danger">确认删除这 ${accounts.length} 个账号</button></div></form></div>`);
+}
+
+async function submitAccountDeletion(form) {
+  const button = form.querySelector('button[type="submit"]'), error = $('#account-delete-error');
+  if (button.disabled || !accountDeletion || db.user?.role !== 'admin') return;
+  button.disabled = true; error.hidden = true;
+  try {
+    const result = await db.deleteAccounts(accountDeletion);
+    accountDeletion = null; await closeModal(); await loadPermissions();
+    toast(`已删除 ${result.deletedIds.length} 个账号。`);
+  } catch (problem) { error.textContent = errorText(problem); error.hidden = false; button.disabled = false; }
+}
+
 async function loadLogs(more = false) {
   if (auditLoading) return;
   auditLoading = true; auditError = ''; if (!more) auditData = null; render();
   try {
-    const data = await db.audit({ cursor: more ? auditData?.cursor || '' : '', query: auditQuery, result: auditResult });
+    const expected = db.user?.id;
+    let data;
+    do {
+      data = await db.audit({ cursor: more ? auditData?.cursor || '' : '', query: auditQuery, result: auditResult, from: auditFrom, to: auditTo });
+      if (db.user?.id !== expected || page !== 'logs') return;
+      if (data.indexing) { auditData = data; render(); }
+    } while (data.indexing);
     auditData = more ? { ...data, items: [...auditData.items, ...data.items] } : data;
   } catch (error) { auditError = errorText(error); }
   finally { auditLoading = false; if (page === 'logs') render(); }
@@ -499,7 +527,7 @@ async function exportAudit(format) {
   if (auditExportBusy || db.user?.role !== 'admin') return;
   auditExportBusy = true; render();
   try {
-    const file = await db.exportAudit(format, { query: auditQuery, result: auditResult });
+    const file = await db.exportAudit(format, { query: auditQuery, result: auditResult, from: auditFrom, to: auditTo });
     const url = URL.createObjectURL(file.blob), link = document.createElement('a');
     link.href = url; link.download = file.filename; document.body.append(link); link.click(); link.remove();
     setTimeout(() => URL.revokeObjectURL(url), 60000);
@@ -537,7 +565,7 @@ async function handleAction(button) {
       break;
     case 'sync': button.disabled = true; try { await refresh(); toast(db.readOnly ? '服务器暂不可达，正在查看缓存。' : '已读取服务器上的最新菜谱'); } finally { if (button.isConnected) button.disabled = false; } break;
     case 'logout': {
-      permissionData = null; auditData = null; recoveryData = null; recoveryError = ''; auditQuery = ''; auditResult = '';
+      permissionData = null; auditData = null; recoveryData = null; recoveryError = ''; auditQuery = ''; auditResult = ''; auditFrom = ''; auditTo = '';
       const cleared = await db.logout(); recipes = []; pendingImport = null; historyItems = []; page = 'recipes'; legacyCount = 0;
       channel?.postMessage({ type: 'account-changed', userId: null }); render();
       showLogin(cleared ? '已退出登录，此设备的服务器缓存已清除。' : '已退出登录。手机缓存未能清理，可在浏览器设置中清除此网站数据。'); break;
@@ -554,6 +582,7 @@ async function handleAction(button) {
       break;
     case 'reload-permissions': await loadPermissions(); break;
     case 'permission-decision': showPermissionDecision(button.dataset); break;
+    case 'account-delete': showAccountDeletion(button.dataset); break;
     case 'load-more-logs': await loadLogs(true); break;
     case 'new': showEditor(); break;
     case 'detail': showDetail(id); db.activity('recipe.view', id).catch(() => {}); break;
@@ -615,8 +644,9 @@ document.addEventListener('submit', event => {
   else if (form.id === 'password-change-form') { event.preventDefault(); submitPasswordChange(form); }
   else if (form.id === 'permission-request-form') { event.preventDefault(); submitPermissionRequest(form); }
   else if (form.id === 'permission-decision-form') { event.preventDefault(); submitPermissionDecision(form); }
+  else if (form.id === 'account-delete-form') { event.preventDefault(); submitAccountDeletion(form); }
   else if (form.id === 'audit-filter-form') {
-    event.preventDefault(); const data = new FormData(form); auditQuery = data.get('query').trim(); auditResult = data.get('result'); loadLogs();
+    event.preventDefault(); const data = new FormData(form); auditQuery = data.get('query').trim(); auditResult = data.get('result'); auditFrom = data.get('from') || ''; auditTo = data.get('to') || ''; loadLogs();
   }
 });
 document.addEventListener('keydown', event => {

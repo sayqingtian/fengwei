@@ -27,6 +27,7 @@ function blobStore() {
       records.set(key, value);
     },
     setJSON(key, value, options) { return this.set(key, JSON.stringify(value), options); },
+    async delete(key) { records.delete(key); },
   };
 }
 function fixture() {
@@ -36,7 +37,12 @@ function fixture() {
     assert.equal(target.origin, 'https://fixture.supabase.co');
     assert.equal(target.pathname, '/rest/v1/fengwei_account_records');
     assert.ok(headers.get('apikey'));
-    requests.push({ method: options.method, url: target, headers });
+    requests.push({ method: options.method, url: target, headers, key: options.body ? JSON.parse(options.body).key : undefined });
+    if (options.method === 'PATCH') {
+      const value = JSON.parse(options.body).value;
+      const result = await pg.query("update fengwei_account_records set value=$1::jsonb where namespace=$2 and key=$3 and value->>'version'=$4 returning namespace,key,value", [JSON.stringify(value), target.searchParams.get('namespace').slice(3), target.searchParams.get('key').slice(3), target.searchParams.get('value->>version').slice(3)]);
+      return Response.json(result.rows);
+    }
     if (options.method === 'POST') {
       assert.equal(target.searchParams.get('on_conflict'), 'namespace,key');
       assert.ok(headers.get('prefer').includes('return=representation'));
@@ -59,8 +65,12 @@ function fixture() {
       const symbols = { eq: '=', gte: '>=', lt: '<' }; assert.ok(symbols[operator]);
       args.push(value); conditions.push(`key ${symbols[operator]} $${args.length}`);
     }
+    for (const field of ['result', 'searchText']) for (const filter of target.searchParams.getAll(`value->>${field}`)) {
+      const operator = filter.slice(0, filter.indexOf('.')), value = filter.slice(filter.indexOf('.') + 1);
+      assert.ok(['eq', 'match'].includes(operator)); args.push(value); conditions.push(`value->>'${field}' ${operator === 'eq' ? '=' : '~'} $${args.length}`);
+    }
     args.push(Number(target.searchParams.get('limit') || 1000), Number(target.searchParams.get('offset') || 0));
-    const result = await pg.query(`select namespace, key, value from fengwei_account_records where ${conditions.join(' and ')} order by key limit $${args.length - 1} offset $${args.length}`, args);
+    const result = await pg.query(`select namespace, key, value from fengwei_account_records where ${conditions.join(' and ')} order by key ${target.searchParams.get('order') === 'key.desc' ? 'desc' : 'asc'} limit $${args.length - 1} offset $${args.length}`, args);
     return Response.json(result.rows);
   };
   const settings = { url: 'https://fixture.supabase.co', secretKey, namespace, fetch: send };
@@ -86,7 +96,7 @@ test('warm authentication reads one fresh SQL credential snapshot per request an
   assert.equal((await f.call(first, 'login', 'POST', { username: 'wupanfeng', password: 'fresh-snapshot-new-password' })).status, 200);
   f.requests.length = 0;
   assert.equal((await f.call(first, 'login', 'POST', { username: `usr_${'e'.repeat(32)}`, password: fixturePassword })).status, 401);
-  assert.ok(f.requests.every(request => request.method === 'GET'), 'unknown IDs never create account or migration rows');
+  assert.ok(f.requests.every(request => !/^private\/(users|registrations|account-migrations)\//.test(request.key || '')), 'unknown IDs never create account or migration rows');
 });
 
 test('password recovery uses the existing PostgreSQL table and concurrent admin decisions cannot overwrite credentials', async () => {
@@ -247,4 +257,84 @@ test('legacy JWT keys use Bearer authorization while failures remain closed and 
   const invisible = f.store({ fetch: async () => Response.json([]) });
   const health = await f.call(f.api(invisible), 'health'); assert.equal(health.status, 503);
   assert.equal((await health.json()).code, 'UNIQUE_STORAGE_UNAVAILABLE');
+});
+
+test('SQL login limits reserve attempts before authentication, survive parallel instances and restarts, and ignore forged IP headers with platform context', async () => {
+  const f = fixture(), handlers = [f.api(), f.api()];
+  const invoke = (handler, i, password = 'wrong-password') => handler(new Request('https://recipes.test/api/login', { method: 'POST', headers: { Origin: 'https://recipes.test', 'Content-Type': 'application/json', 'X-Real-IP': `forged-${i}`, 'CF-Connecting-IP': `also-forged-${i}` }, body: JSON.stringify({ username: 'wupanfeng', password }) }), { clientIp: 'trusted-platform-client' });
+  const responses = await Promise.all(Array.from({ length: 20 }, (_, i) => invoke(handlers[i % 2], i)));
+  assert.equal(responses.filter(r => r.status === 401).length, 10);
+  assert.equal(responses.filter(r => r.status === 429).length, 10);
+  const restarted = await invoke(f.api(), 21, fixturePassword);
+  assert.equal(restarted.status, 429); assert.ok(Number(restarted.headers.get('retry-after')) > 0);
+  const count = await pg.query("select value->>'count' as count from fengwei_account_records where namespace=$1 and key like 'private/rate-limits/login/%'", [f.namespace]);
+  assert.equal(count.rows.length, 1); assert.equal(Number(count.rows[0].count), 10);
+  await pg.query("update fengwei_account_records set value=jsonb_set(value, '{expires}', '0') where namespace=$1 and key like 'private/rate-limits/login/%'", [f.namespace]);
+  assert.equal((await invoke(f.api(), 22, fixturePassword)).status, 200);
+});
+
+test('SQL account deletion revokes existing sessions and recovery, protects admin and reserves a fresh identity on re-registration', async () => {
+  const f = fixture(), api = f.api();
+  const owner = await f.call(api, 'login', 'POST', { username: 'wupanfeng', password: fixturePassword }), ownerCookie = cookieOf(owner);
+  const registered = await f.call(api, 'register', 'POST', { displayName: 'delete-fixture-user', password: fixturePassword, registrationId: randomUUID() });
+  const userCookie = cookieOf(registered), user = (await registered.json()).user;
+  const data = { accounts: [{ id: user.id, displayName: user.displayName }], mutationId: randomUUID() };
+  assert.equal((await f.call(api, 'accounts/delete', 'POST', data, userCookie)).status, 403);
+  assert.equal((await f.call(api, 'accounts/delete', 'POST', data, ownerCookie)).status, 200);
+  const restarted = f.api();
+  assert.equal((await f.call(restarted, 'me', 'GET', undefined, userCookie)).status, 401);
+  assert.equal((await f.call(restarted, 'login', 'POST', { username: user.id, password: fixturePassword })).status, 401);
+  const again = await f.call(restarted, 'register', 'POST', { displayName: user.displayName, password: fixturePassword, registrationId: randomUUID() });
+  assert.equal(again.status, 201); const replacement = (await again.json()).user; assert.notEqual(replacement.id, user.id); assert.equal(replacement.role, 'viewer');
+  const rows = (await f.call(restarted, 'permissions', 'GET', undefined, ownerCookie));
+  assert.ok(!(await rows.json()).accounts.some(item => item.id === user.id));
+  const ownerUser = (await owner.json()).user;
+  assert.equal((await f.call(restarted, 'accounts/delete', 'POST', { accounts: [{ id: ownerUser.id, displayName: ownerUser.displayName }], mutationId: randomUUID() }, ownerCookie)).status, 403);
+});
+
+test('SQL audit migration resumes in bounded batches, pages without legacy reads, filters literal text and dates, and repairs a failed index write', async () => {
+  const { AuditLog } = await import('../server/audit.mjs');
+  const f = fixture(), legacy = new AuditLog(f.source);
+  for (let i = 0; i < 230; i++) {
+    const entry = legacy.entry({ id: 'review', displayName: '测试用户' }, 'recipe.view', { target: i === 100 ? '100%_*.[literal]' : `历史日志 ${i}` });
+    entry.createdAt = new Date(Date.UTC(2026, 9, 10 + Math.floor(i / 100), 0, 0, i % 100)).toISOString();
+    await f.source.setJSON(`private/audit/${entry.id}.json`, entry);
+  }
+  const store = f.store(), originalSet = store.setJSON.bind(store); let breakIndex = false;
+  store.setJSON = async (key, value, options) => { if (breakIndex && key.startsWith('private/audit-index/')) { breakIndex = false; throw new Error('test transient index failure'); } return originalSet(key, value, options); };
+  const api = f.api(store), login = await f.call(api, 'login', 'POST', { username: 'wupanfeng', password: fixturePassword }), cookie = cookieOf(login);
+  let page, rounds = 0;
+  do { page = await (await f.call(api, 'audit', 'GET', undefined, cookie)).json(); rounds++; } while (page.indexing && rounds < 10);
+  assert.ok(rounds >= 3); assert.equal(page.items.length, 50); assert.ok(page.cursor);
+  let legacyReads = 0; const sourceGet = f.source.get.bind(f.source);
+  f.source.get = (key, options) => { if (key.startsWith('private/audit/') || key.startsWith('recipes/')) legacyReads++; return sourceGet(key, options); };
+  f.requests.length = 0;
+  const next = await (await f.call(api, `audit?cursor=${encodeURIComponent(page.cursor)}`, 'GET', undefined, cookie)).json();
+  assert.equal(next.items.length, 50); assert.equal(legacyReads, 0);
+  assert.equal(new Set([...page.items, ...next.items].map(item => item.id)).size, 100);
+  const pageQueries = f.requests.filter(item => item.url.searchParams.get('order') === 'key.desc');
+  assert.equal(pageQueries.length, 1); assert.equal(pageQueries[0].url.searchParams.get('limit'), '51');
+  const filtered = await (await f.call(api, `audit?q=${encodeURIComponent('100%_*.[literal]')}&from=2026-10-11&to=2026-10-11`, 'GET', undefined, cookie)).json();
+  assert.equal(filtered.items.length, 1); assert.equal(filtered.items[0].target, '100%_*.[literal]'); assert.equal(filtered.items[0].searchText, undefined);
+  const exported = await f.call(api, 'audit/export?format=json&from=2026-10-10&to=2026-10-10', 'GET', undefined, cookie);
+  assert.equal(exported.status, 200); assert.equal((await exported.json()).total, 100);
+  assert.equal((await f.call(api, 'audit?from=2026-02-31', 'GET', undefined, cookie)).status, 400);
+  breakIndex = true;
+  assert.equal((await f.call(api, 'activity', 'POST', { action: 'backup.export' }, cookie)).status, 200);
+  assert.ok([...f.source.records.keys()].some(key => key.startsWith('private/audit-pending/')));
+  const repaired = await (await f.call(api, 'audit?q=' + encodeURIComponent('导出备份'), 'GET', undefined, cookie)).json();
+  assert.equal(repaired.items.length, 1); assert.ok(![...f.source.records.keys()].some(key => key.startsWith('private/audit-pending/')));
+});
+
+test('migrating an already deleted Blob account never revives its login or old cookie', async () => {
+  const f = fixture(); f.source.atomic(true);
+  const legacy = f.api(f.source);
+  const signup = await f.call(legacy, 'register', 'POST', { displayName: 'legacy-deleted-fixture', password: fixturePassword, registrationId: randomUUID() });
+  const cookie = cookieOf(signup), user = (await signup.json()).user;
+  await f.source.setJSON(`private/deleted-users/${user.id}.json`, { id: user.id, displayName: user.displayName, deletedAt: new Date().toISOString() });
+  f.source.atomic(false);
+  const migrated = f.api();
+  assert.equal((await f.call(migrated, 'me', 'GET', undefined, cookie)).status, 401);
+  assert.equal((await f.call(migrated, 'login', 'POST', { username: user.id, password: fixturePassword })).status, 401);
+  assert.equal((await f.store().accountSnapshot(user.id)).get(`private/deleted-users/${user.id}.json`).id, user.id);
 });

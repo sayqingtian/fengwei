@@ -1,7 +1,9 @@
-import { createHash } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
+import { AUDIT_PREFIX, auditTerms } from './audit-index.mjs';
 
-const accountPrefixes = ['private/users/', 'private/usernames/', 'private/registrations/', 'private/password-changes/', 'private/password-heads/', 'private/account-migrations/', 'private/password-recovery-requests/', 'private/password-recovery-decisions/', 'private/password-recovery-limits/'];
+const accountPrefixes = ['private/users/', 'private/usernames/', 'private/registrations/', 'private/password-changes/', 'private/password-heads/', 'private/account-migrations/', 'private/password-recovery-requests/', 'private/password-recovery-decisions/', 'private/password-recovery-limits/', 'private/deleted-users/', 'private/rate-limits/', 'private/audit-index/', 'private/audit-canonical/', 'private/audit-migration/'];
 const probePrefix = 'private/registration-storage-check';
+const sqlOnly = key => /^private\/(rate-limits|audit-index|audit-canonical|audit-migration)\//.test(key);
 const bindingKey = 'private/account-database-binding.json';
 const isAccountKey = key => accountPrefixes.some(prefix => key.startsWith(prefix)) || key.startsWith(probePrefix);
 const includesAccounts = prefix => isAccountKey(prefix) || accountPrefixes.some(path => path.startsWith(prefix)) || probePrefix.startsWith(prefix);
@@ -86,10 +88,41 @@ class SupabaseAccountStore {
     if (rows.length > 1 || (rows.length && rows[0].key !== key)) throw unavailable('ACCOUNT_DATABASE_UNAVAILABLE');
     return rows[0] || null;
   }
+  async consumeRateLimit(key, { limit, windowMs, now }) {
+    if (!key.startsWith('private/rate-limits/')) throw unavailable('ACCOUNT_DATABASE_UNSUPPORTED_KEY');
+    for (let attempt = 0; attempt < 40; attempt++) {
+      const previous = await this.readRecord(key), state = previous?.value;
+      const active = state?.expires > now;
+      if (active && state.count >= limit) return { allowed: false, retryAfter: Math.max(1, Math.ceil((state.expires - now) / 1000)) };
+      const value = { count: (active ? state.count : 0) + 1, expires: active ? state.expires : now + windowMs, version: randomUUID() };
+      if (!previous) {
+        if (await this.writeRecord(key, value, true)) return { allowed: true };
+      } else {
+        if (typeof state?.version !== 'string' || !Number.isSafeInteger(state.count) || !Number.isFinite(state.expires)) throw unavailable('ACCOUNT_DATABASE_UNAVAILABLE');
+        const rows = await this.request('PATCH', [['namespace', `eq.${this.namespace}`], ['key', `eq.${key}`], ['value->>version', `eq.${state.version}`], ['select', 'namespace,key,value']], { value }, 'return=representation');
+        if (rows.length === 1 && rows[0].key === key && rows[0].value.version === value.version) return { allowed: true };
+        if (rows.length) throw unavailable('ACCOUNT_DATABASE_UNAVAILABLE');
+      }
+    }
+    throw unavailable('ACCOUNT_DATABASE_UNAVAILABLE');
+  }
+  async queryAudit({ cursor = '', query = '', result = '', from = '', to = '', limit = 51 } = {}) {
+    const filters = [['namespace', `eq.${this.namespace}`], ['key', `gte.${AUDIT_PREFIX}${from}`], ['key', `lt.${AUDIT_PREFIX}${to || '\uffff'}`], ['order', 'key.desc'], ['limit', String(limit)], ['select', 'namespace,key,value']];
+    if (cursor) filters.push(['key', `lt.${AUDIT_PREFIX}${cursor}.json`]);
+    if (result) filters.push(['value->>result', `eq.${result}`]);
+    // Escaped regex preserves literal text, including PostgREST's LIKE '*' alias.
+    for (const term of auditTerms(query)) filters.push(['value->>searchText', `match.${term.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}`]);
+    const rows = await this.request('GET', filters);
+    return rows.map(row => row.value);
+  }
+  async clearAuditPending(key) {
+    if (!/^private\/audit-pending\/[a-f0-9]{64}\.json$/.test(key)) throw unavailable('ACCOUNT_DATABASE_UNSUPPORTED_KEY');
+    if (this.source.delete) await this.source.delete(key);
+  }
   async accountSnapshot(id) {
     if (!/^usr_[a-f0-9]{32}$/.test(id)) throw unavailable('ACCOUNT_DATABASE_UNSUPPORTED_KEY');
     const changes = `private/password-changes/${id}/`, marker = `private/account-migrations/${id}.json`;
-    const fixed = [`private/users/${id}.json`, `private/registrations/${id}.json`, `private/password-heads/${id}.json`, marker];
+    const fixed = [`private/users/${id}.json`, `private/registrations/${id}.json`, `private/password-heads/${id}.json`, marker, `private/deleted-users/${id}.json`];
     const matches = key => fixed.includes(key) || key.startsWith(changes);
     const read = async () => {
       const records = new Map();
@@ -106,11 +139,12 @@ class SupabaseAccountStore {
     if (records.get(marker)?.version !== 1) {
       // Import the complete legacy credential chain once before relying on a
       // single fresh SQL snapshot. Missing Blob keys then need no repeated IO.
-      const [users, registrations, head, history] = await Promise.all([
-        ...fixed.slice(0, 3).map(key => this.source.get(key, { type: 'json', consistency: 'strong' })),
+      const legacyKeys = [fixed[0], fixed[1], fixed[2], fixed[4]];
+      const [values, history] = await Promise.all([
+        Promise.all(legacyKeys.map(key => this.source.get(key, { type: 'json', consistency: 'strong' }))),
         this.source.list({ prefix: changes, consistency: 'strong' }),
       ]);
-      const imports = fixed.slice(0, 3).map((key, index) => [key, [users, registrations, head][index]]);
+      const imports = legacyKeys.map((key, index) => [key, values[index]]);
       const previous = await Promise.all(history.blobs.filter(({ key }) => !records.has(key)).map(async ({ key }) => [key, await this.source.get(key, { type: 'json', consistency: 'strong' })]));
       imports.push(...previous);
       // Unknown login IDs must remain read-only rather than create migration rows.
@@ -135,7 +169,7 @@ class SupabaseAccountStore {
   async get(key, options = {}) {
     if (!isAccountKey(key)) return this.source.get(key, options);
     let record = await this.readRecord(key);
-    if (!record && !key.startsWith(probePrefix)) {
+    if (!record && !key.startsWith(probePrefix) && !sqlOnly(key)) {
       const previous = await this.source.get(key, { type: 'json', consistency: 'strong' });
       if (previous !== null && previous !== undefined) {
         await this.writeRecord(key, previous, true);
@@ -148,7 +182,7 @@ class SupabaseAccountStore {
   async list(options = {}) {
     const prefix = options.prefix || '';
     if (!includesAccounts(prefix)) return this.source.list(options);
-    const keys = new Set((await this.source.list(options)).blobs.map(item => item.key)), values = new Map();
+    const keys = new Set(sqlOnly(prefix) ? [] : (await this.source.list(options)).blobs.map(item => item.key)), values = new Map();
     const limit = 1000;
     for (let offset = 0; ; offset += limit) {
       // C collation in the SQL schema makes this a literal prefix range,
@@ -173,7 +207,7 @@ class SupabaseAccountStore {
       if (options.onlyIfNew) throw unavailable('ACCOUNT_DATABASE_UNSUPPORTED_KEY');
       return this.source.setJSON(key, value, options);
     }
-    if (options.onlyIfNew && !key.startsWith(probePrefix)) {
+    if (options.onlyIfNew && !key.startsWith(probePrefix) && !sqlOnly(key)) {
       // Import a pre-existing Blob reservation before attempting SQL INSERT.
       // The unique primary key selects one winner across concurrent instances.
       const migratedId = /^private\/(?:users|registrations|password-heads|password-changes)\/(usr_[a-f0-9]{32})(?:\/|\.json$)/.exec(key)?.[1];

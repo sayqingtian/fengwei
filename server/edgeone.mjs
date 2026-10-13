@@ -5,7 +5,7 @@ import { publicEdgeOneRequest, DEFAULT_PUBLIC_ORIGIN } from './edgeone-request.m
 import { createAccountStore } from './account-store.mjs';
 
 let handler;
-export default async function onRequest({ request, env = {} }) {
+export default async function onRequest({ request, env = {}, clientIp }) {
   let publicRequest;
   try { publicRequest = publicEdgeOneRequest(request, process.env.PUBLIC_ORIGIN || env.PUBLIC_ORIGIN || DEFAULT_PUBLIC_ORIGIN); }
   catch { return Response.json({ error: '部署域名配置不正确，请将 PUBLIC_ORIGIN 设置为完整的 HTTPS 网站入口。', code: 'PUBLIC_ORIGIN_INVALID' }, { status: 503, headers: { 'Cache-Control': 'private, no-store' } }); }
@@ -24,7 +24,7 @@ export default async function onRequest({ request, env = {} }) {
       return Response.json({ error: '服务器持久化存储尚未连接，请检查 EdgeOne 的 Blob 服务是否可用。', code: 'STORAGE_UNAVAILABLE' }, { status: 503, headers: { 'Cache-Control': 'private, no-store', 'Vary': 'Cookie' } });
     }
   }
-  return handler(publicRequest);
+  return handler(publicRequest, { clientIp: typeof clientIp === 'string' && clientIp ? clientIp : 'unknown' });
 }
 
 export { onRequest };

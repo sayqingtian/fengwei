@@ -1,4 +1,5 @@
 import { AsyncLocalStorage } from 'node:async_hooks';
+import { indexAudit } from './audit-index.mjs';
 
 const immutable = key => /^recipes\/[a-f0-9]{64}\/\d{12}-\d{13}-[a-zA-Z0-9-]+\.json$/.test(key) || /^photos\/[a-f0-9]{64}\.txt$/.test(key) || /^private\/auth\/[a-f0-9]{64}\/\d{13}-[a-f0-9-]{36}\.json$/.test(key) || /^private\/permissions\/usr_[a-f0-9]{32}\/\d{12}-\d{13}-[a-zA-Z0-9-]+\.json$/.test(key) || /^private\/favorites\/usr_[a-f0-9]{32}\/[a-f0-9]{64}\/\d{13}-[a-zA-Z0-9-]+\.json$/.test(key);
 
@@ -22,12 +23,25 @@ export function requestStore(source) {
     return clone(await cache.get(key));
   }
   function invalidate() { const scope = context.getStore(); if (scope) for (const cache of Object.values(scope)) cache.clear(); }
+  async function indexReceipt(key, value) {
+    if (!source.queryAudit) return;
+    const entry = key.startsWith('private/audit/') ? value : value?.auditEntry;
+    if (!entry) return;
+    try { await indexAudit(source, entry); }
+    catch (error) {
+      // The business record remains authoritative. Queue a small retry in Blob
+      // if SQL indexing is temporarily unavailable; never report a saved edit as lost.
+      console.error('Fengwei audit search index unavailable:', error.code || error.name);
+      try { await source.setJSON(`private/audit-pending/${entry.id}.json`, entry, { cacheControl: 'no-store' }); }
+      catch (failure) { console.error('Fengwei audit retry unavailable:', failure.code || failure.name); }
+    }
+  }
   const store = {
     run: work => context.run({ reads: new Map(), lists: new Map(), accounts: new Map() }, work),
     async get(key, options = {}) {
       const cacheKey = JSON.stringify([key, options]);
       return memo('reads', cacheKey, async () => {
-        const id = /^private\/(?:users|registrations|password-heads|password-changes)\/(usr_[a-f0-9]{32})(?:\/|\.json$)/.exec(key)?.[1];
+        const id = /^private\/(?:users|registrations|password-heads|password-changes|deleted-users)\/(usr_[a-f0-9]{32})(?:\/|\.json$)/.exec(key)?.[1];
         const snapshot = id && context.getStore()?.accounts.get(id);
         if (snapshot) { const values = await snapshot; const value = values.get(key) ?? null; return options.type === 'json' ? clone(value) : value == null ? null : JSON.stringify(value); }
         if (immutable(key)) {
@@ -51,8 +65,14 @@ export function requestStore(source) {
       return result;
     },
     async set(key, value, options) { invalidate(); const result = await source.set(key, value, options); invalidate(); return result; },
-    async setJSON(key, value, options) { invalidate(); const result = await source.setJSON(key, value, options); invalidate(); return result; },
+    async setJSON(key, value, options) { invalidate(); const result = await source.setJSON(key, value, options); invalidate(); await indexReceipt(key, value); return result; },
   };
   if (source.accountSnapshot) store.accountSnapshot = id => memo('accounts', id, () => source.accountSnapshot(id));
+  if (source.consumeRateLimit) store.consumeRateLimit = (key, options) => source.consumeRateLimit(key, options);
+  if (source.queryAudit) {
+    store.queryAudit = options => source.queryAudit(options);
+    store.indexAudit = entry => indexAudit(source, entry);
+    store.clearAuditPending = key => source.clearAuditPending?.(key);
+  }
   return store;
 }

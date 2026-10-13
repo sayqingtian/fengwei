@@ -1,10 +1,11 @@
-import { cp, mkdir, writeFile, readFile, readdir } from 'node:fs/promises';
+import { cp, mkdir, writeFile, readFile, readdir, rm } from 'node:fs/promises';
 import { resolve, relative } from 'node:path';
 import { build } from 'esbuild';
 import { createHash } from 'node:crypto';
 import { makeZip } from './zip.mjs';
 
 const output = resolve('artifacts', 'fengwei-edgeone');
+await rm(output, { recursive: true, force: true });
 await mkdir(output, { recursive: true });
 await cp('dist', output, { recursive: true });
 const functionFile = resolve(output, 'cloud-functions', 'api', '[[default]].js');
@@ -27,7 +28,7 @@ async function walk(directory) {
   }
 }
 await walk(output);
-if (manifest.some(item => /(^|\/)(\.env|\.data|node_modules|tests|artifacts)(\/|$)/.test(item.file))) throw new Error('Private/development files found in upload artifacts.');
+if (manifest.some(item => /(^|\/)(\.env(?:\.[^/]*)?|\.data|\.git|node_modules|tests|artifacts)(\/|$)/.test(item.file))) throw new Error('Private/development files found in upload artifacts.');
 await writeFile(resolve('artifacts', 'fengwei-build-manifest.json'), JSON.stringify(manifest, null, 2));
 const entries = await Promise.all(manifest.map(async item => ({ name: item.file, content: await readFile(resolve(output, item.file)) })));
 const currentZip = makeZip(entries);

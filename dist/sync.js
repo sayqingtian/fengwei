@@ -23,6 +23,17 @@ export async function createRemoteStore(local) {
   for (const recipe of records) { const key = hashes[recipe.id]; if (key && recipe.photo) photoCache.set(key, recipe.photo); }
   let cacheWarning = !local;
   let accountEpoch = 0, syncing = null;
+  let dataEpoch = 0, mutationTail = Promise.resolve();
+  function mutate(work) {
+    const epoch = accountEpoch;
+    dataEpoch++;
+    const pending = mutationTail.then(() => {
+      if (epoch !== accountEpoch) throw new ApiError('账号已切换，本次保存已取消。', 409, 'ACCOUNT_CHANGED');
+      return work();
+    });
+    mutationTail = pending.catch(() => {});
+    return pending;
+  }
   const photoLoads = new Map();
   let batchPhotos = true, photoReferences = false;
   const apiBase = new URL('./api/', import.meta.url);
@@ -45,6 +56,7 @@ export async function createRemoteStore(local) {
     user = nextUser;
   }
   async function request(path, { method = 'GET', value } = {}) {
+    const epoch = accountEpoch;
     for (let attempt = 0; attempt < 3; attempt++) {
       let response;
       try {
@@ -52,6 +64,7 @@ export async function createRemoteStore(local) {
       } catch { throw new ApiError('服务器暂时连不上。缓存仍可查看，修改需要联网后再保存。', 0, 'NETWORK'); }
       let data;
       try { data = await response.json(); } catch { throw new ApiError('服务器接口未就绪，请确认上传了包含云函数的完整峰味部署包。', response.status, 'INVALID_RESPONSE'); }
+      if (epoch !== accountEpoch) throw new ApiError('账号已切换，本次请求已取消。', 409, 'ACCOUNT_CHANGED');
       // Retries preserve the exact registration/mutation ID. These errors occur
       // before the platform's request body is available for a server mutation.
       if (response.status === 400 && ['EMPTY_BODY', 'BODY_UNREADABLE'].includes(data.code) && attempt < 2) continue;
@@ -122,7 +135,7 @@ export async function createRemoteStore(local) {
   function ensureOnline() {
     if (offline || globalThis.navigator?.onLine === false) throw new ApiError('当前为离线预览，修改还没有保存。联网后请先同步，再保存。', 0, 'OFFLINE');
   }
-  async function write(id, recipe, method = 'PUT', options = {}) {
+  async function writeNow(id, recipe, method = 'PUT', options = {}) {
     ensureOnline();
     const valid = recipe ? validateRecipe(recipe) : null;
     const reused = photoReferences && valid?.photo && hashes[id] && photoCache.get(hashes[id]) === valid.photo ? hashes[id] : '';
@@ -138,7 +151,9 @@ export async function createRemoteStore(local) {
     }
     authenticated = true; await persist();
   }
-  async function setFavorite(id, favorite) {
+  const write = (...args) => mutate(() => writeNow(...args));
+  const setFavorite = (...args) => mutate(() => setFavoriteNow(...args));
+  async function setFavoriteNow(id, favorite) {
     ensureOnline();
     const data = await request(`favorite/${encodeURIComponent(id)}`, { method: 'PUT', value: { favorite, expectedUserId: user?.id, mutationId: createId() } });
     await sameAccount(data);
@@ -146,6 +161,8 @@ export async function createRemoteStore(local) {
     await persist();
   }
   async function synchronize(job) {
+    await mutationTail;
+    const version = dataEpoch;
     try {
       const next = [], newRevisions = Object.create(null), newHashes = Object.create(null), newConflicts = [];
       let cursor = null, first = true;
@@ -162,6 +179,9 @@ export async function createRemoteStore(local) {
         await loadPhotos(data.items);
         const hydrated = await parallel(data.items, hydrate);
         if (job.epoch !== accountEpoch) throw new ApiError('账号已切换，本次同步已取消。', 409, 'ACCOUNT_CHANGED');
+        // A save/favorite may have completed while this response was in flight.
+        // Wait for all queued mutations, then fetch a fresh snapshot.
+        if (version !== dataEpoch) return synchronize(job);
         for (let i = 0; i < data.items.length; i++) {
           const item = data.items[i]; newRevisions[item.id] = item.revision; newHashes[item.id] = item.photoHash;
           if (item.conflictCount > 1) newConflicts.push(item.id); if (hydrated[i]) next.push(hydrated[i]);
@@ -173,6 +193,7 @@ export async function createRemoteStore(local) {
     } catch (error) {
       if (error.status === 401) throw error;
       if (job.epoch !== accountEpoch) throw new ApiError('账号已切换，本次同步已取消。', 409, 'ACCOUNT_CHANGED');
+      if (version !== dataEpoch) return synchronize(job);
       if ((error.code === 'NETWORK' || error.code === 'STORAGE_UNAVAILABLE') && snapshot?.user && Date.now() - snapshot.authenticatedAt < CACHE_AGE) { offline = true; authenticated = true; return records; }
       throw error;
     }
@@ -234,12 +255,13 @@ export async function createRemoteStore(local) {
     async permissions() { ensureOnline(); const data = await request('permissions'); await sameAccount(data); await acceptUser(data.user); await persist(); return data; },
     async requestPermission(reason, requestId) { ensureOnline(); const data = await request('permissions/request', { method: 'POST', value: { reason, requestId } }); await sameAccount(data); return data; },
     async decidePermission(value) { ensureOnline(); const data = await request('permissions/decision', { method: 'POST', value }); await sameAccount(data); return data; },
-    async audit({ cursor = '', query = '', result = '' } = {}) {
-      ensureOnline(); const params = new URLSearchParams({ cursor, q: query, result });
+    async deleteAccounts(value) { ensureOnline(); const data = await request('accounts/delete', { method: 'POST', value: { ...value, expectedUserId: user?.id } }); await sameAccount(data); return data; },
+    async audit({ cursor = '', query = '', result = '', from = '', to = '' } = {}) {
+      ensureOnline(); const params = new URLSearchParams({ cursor, q: query, result, from, to });
       const data = await request(`audit?${params}`); await sameAccount(data); return data;
     },
-    async exportAudit(format, { query = '', result = '' } = {}) {
-      ensureOnline(); const params = new URLSearchParams({ format, q: query, result });
+    async exportAudit(format, { query = '', result = '', from = '', to = '' } = {}) {
+      ensureOnline(); const params = new URLSearchParams({ format, q: query, result, from, to });
       const expectedUserId = user?.id;
       let response;
       try { response = await fetch(new URL(`audit/export?${params}`, apiBase), { credentials: 'same-origin', cache: 'no-store', signal: AbortSignal.timeout(25000) }); }

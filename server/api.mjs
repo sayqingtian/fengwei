@@ -8,9 +8,8 @@ import { AuditLog } from './audit.mjs';
 import { makeAuditExport } from './audit-export.mjs';
 import { PasswordRecovery, RECOVERY_MESSAGE } from './password-recovery.mjs';
 import { requestStore } from './request-store.mjs';
+import { RateLimits } from './rate-limit.mjs';
 
-const failures = new Map();
-const registrations = new Map();
 const publicEvent = (event, favorite) => event && ({ id: event.id, revision: event.revision, deleted: event.deleted, photoHash: event.photoHash, recipe: event.recipe ? { ...event.recipe, favorite: !!favorite } : null, savedAt: event.savedAt, conflictCount: event.conflictCount || 1 });
 class HttpError extends Error { constructor(status, code, message) { super(message); Object.assign(this, { status, code }); } }
 const fail = (status, code, message) => { throw new HttpError(status, code, message); };
@@ -24,15 +23,26 @@ function writableOrigin(request) {
 function mutation(data) {
   if (!data || typeof data !== 'object' || !/^[a-zA-Z0-9-]{8,128}$/.test(data.mutationId || '') || !Object.hasOwn(data, 'baseRevision')) fail(400, 'INVALID_MUTATION', '保存请求缺少版本信息，请刷新后重试。');
 }
+function auditDates(params) {
+  const dates = {};
+  for (const key of ['from', 'to']) {
+    const value = params.get(key) || '';
+    if (value && (!/^\d{4}-\d{2}-\d{2}$/.test(value) || !Number.isFinite(Date.parse(value + 'T00:00:00Z')) || new Date(value + 'T00:00:00Z').toISOString().slice(0, 10) !== value)) fail(400, 'INVALID_FILTER', '请选择有效的日志日期。');
+    dates[key] = value ? new Date(Date.parse(value + 'T00:00:00+08:00') + (key === 'to' ? 86400000 : 0)).toISOString() : '';
+  }
+  if (dates.from && dates.to && dates.from >= dates.to) fail(400, 'INVALID_FILTER', '结束日期不能早于开始日期。');
+  return dates;
+}
 export function createApi({ database, password }) {
+  const limits = new RateLimits(database.store);
   const store = requestStore(database.store);
   database = new RecipeDatabase(store);
   const auth = password === undefined ? createAuth(database?.store) : createAuth(database?.store, testAccount(password));
   const favorites = new Favorites(database.store, auth.accounts.legacyId);
   const audit = new AuditLog(database.store), permissions = auth.permissions;
-  const passwordFailures = new Map();
-  const recovery = new PasswordRecovery(auth.accounts, permissions.adminId), recoveryAttempts = new Map();
-  return request => store.run(async () => {
+  const recovery = new PasswordRecovery(auth.accounts, permissions.adminId);
+  return (request, context = {}) => store.run(async () => {
+    const address = context.clientIp ?? request.headers.get('x-real-ip') ?? 'local';
     const started = performance.now();
     let renewedCookie, actor, action, target = '', operationId;
     const receipt = () => audit.entry(actor, action, { target, operationId });
@@ -62,16 +72,11 @@ export function createApi({ database, password }) {
         action = 'account.login';
         const data = await body(request, 4096);
         actor = { displayName: typeof data?.username === 'string' ? data.username.trim().slice(0, 64) : '未登录用户' };
-        const address = request.headers.get('cf-connecting-ip') || request.headers.get('x-real-ip') || request.headers.get('x-forwarded-for')?.split(',')[0] || 'unknown';
-        const key = hash(address), attempt = failures.get(key);
-        if (attempt && attempt.expires > Date.now() && attempt.count >= 10) fail(429, 'TRY_LATER', '尝试次数较多，请 5 分钟后再试。');
+        await limits.consume('login', address, 10, 300000, 'TRY_LATER', '尝试次数较多，请 5 分钟后再试。');
         const user = await auth.accounts.authenticate(data?.username, data?.password);
         if (!user) {
-          if (failures.size > 2000) for (const [key, item] of failures) if (item.expires < Date.now()) failures.delete(key);
-          failures.set(key, { count: attempt?.expires > Date.now() ? attempt.count + 1 : 1, expires: Date.now() + 300000 });
           fail(401, 'BAD_CREDENTIALS', '账号或密码不正确。');
         }
-        failures.delete(key);
         const [profile, token] = await Promise.all([permissions.profile(user), auth.issue(user)]);
         actor = publicUser(profile);
         await record('success');
@@ -81,12 +86,7 @@ export function createApi({ database, password }) {
         action = 'account.register';
         const data = await body(request, 4096);
         actor = { displayName: typeof data?.displayName === 'string' ? data.displayName.trim().slice(0, 30) : '未登录用户' };
-        const address = request.headers.get('cf-connecting-ip') || request.headers.get('x-real-ip') || request.headers.get('x-forwarded-for')?.split(',')[0] || 'unknown';
-        const key = hash(address), previous = registrations.get(key);
-        const attempt = previous?.expires > Date.now() ? previous : { count: 0, expires: Date.now() + 3600000 };
-        if (attempt.count >= 20) fail(429, 'REGISTER_LATER', '注册次数较多，请稍后再试。');
-        attempt.count++; registrations.set(key, attempt);
-        if (registrations.size > 2000) for (const [key, item] of registrations) if (item.expires < Date.now()) registrations.delete(key);
+        await limits.consume('register', address, 20, 3600000, 'REGISTER_LATER', '注册次数较多，请稍后再试。');
         const user = await auth.accounts.register(data);
         actor = publicUser(await permissions.profile(user)); operationId = data.registrationId;
         await record('success');
@@ -94,12 +94,7 @@ export function createApi({ database, password }) {
       }
       if (route === 'account/recovery' && method === 'POST') {
         action = 'account.recovery.request'; target = '密码找回申请';
-        const address = request.headers.get('cf-connecting-ip') || request.headers.get('x-real-ip') || request.headers.get('x-forwarded-for')?.split(',')[0] || 'unknown';
-        const key = hash(address), previous = recoveryAttempts.get(key);
-        const attempt = previous?.expires > Date.now() ? previous : { count: 0, expires: Date.now() + 900000 };
-        if (attempt.count >= 5) fail(429, 'RECOVERY_TRY_LATER', '找回申请次数较多，请 15 分钟后再试。');
-        attempt.count++; recoveryAttempts.set(key, attempt);
-        if (recoveryAttempts.size > 2000) for (const [id, entry] of recoveryAttempts) if (entry.expires < Date.now()) recoveryAttempts.delete(id);
+        await limits.consume('recovery', address, 5, 900000, 'RECOVERY_TRY_LATER', '找回申请次数较多，请 15 分钟后再试。');
         const data = await body(request, 4096); operationId = data?.requestId;
         await recovery.request(data, receipt()); await record('success');
         return reply({ ok: true, message: RECOVERY_MESSAGE });
@@ -133,21 +128,29 @@ export function createApi({ database, password }) {
         }
         return reply({ userId: user.id, item });
       }
+      if (route === 'accounts/delete' && method === 'POST') {
+        action = 'account.delete';
+        if (user.role !== 'admin') fail(403, 'ADMIN_REQUIRED', '只有 wupanfeng 管理员可以删除账号。');
+        const data = await body(request, 8192);
+        if (data?.expectedUserId && data.expectedUserId !== user.id) fail(409, 'ACCOUNT_CHANGED', '账号已切换，请刷新后重试。');
+        const targets = await auth.accounts.deletionTargets(data);
+        const deletedIds = [];
+        for (const account of targets) {
+          target = `${account.displayName} · ${account.id}`;
+          operationId = `${data.mutationId}:${account.id}`;
+          try { await auth.accounts.deleteAccount(account, user, data.mutationId, receipt()); }
+          catch { fail(503, 'ACCOUNT_DELETE_PARTIAL', `已确认删除 ${deletedIds.length} 个账号，其余账号暂未确认删除。请刷新账号列表后重试。`); }
+          deletedIds.push(account.id);
+          await record('success');
+        }
+        action = undefined;
+        return reply({ ok: true, deletedIds });
+      }
       if (route === 'account/password' && method === 'POST') {
         action = 'account.password'; target = '本人账号';
-        const previous = passwordFailures.get(user.id);
-        if (previous?.expires > Date.now() && previous.count >= 10) fail(429, 'PASSWORD_TRY_LATER', '当前密码尝试次数较多，请 5 分钟后再试。');
+        await limits.consume('password', user.id, 10, 300000, 'PASSWORD_TRY_LATER', '密码修改尝试次数较多，请 5 分钟后再试。');
         const data = await body(request, 4096); operationId = data?.mutationId;
-        let account;
-        try { account = await auth.accounts.changePassword(user.id, data, session.account.passwordVersion || 'initial', receipt()); }
-        catch (error) {
-          if (['CURRENT_PASSWORD_INCORRECT', 'PASSWORD_CHANGE_CONFLICT'].includes(error.code)) {
-            for (const [key, entry] of passwordFailures) if (entry.expires < Date.now()) passwordFailures.delete(key);
-            passwordFailures.set(user.id, { count: previous?.expires > Date.now() ? previous.count + 1 : 1, expires: Date.now() + 300000 });
-          }
-          throw error;
-        }
-        passwordFailures.delete(user.id);
+        const account = await auth.accounts.changePassword(user.id, data, session.account.passwordVersion || 'initial', receipt());
         return reply({ ok: true, userId: user.id, user: publicUser(await permissions.profile(account)) }, 200, { 'Set-Cookie': sessionCookie(request, await auth.issue(account)) });
       }
       if (route === 'permissions' && method === 'GET') {
@@ -177,16 +180,19 @@ export function createApi({ database, password }) {
         if (route === 'audit/export') { action = 'audit.export'; target = '操作日志'; }
         if (user.role !== 'admin') fail(403, 'ADMIN_REQUIRED', '只有 wupanfeng 管理员可以查看操作日志。');
         const cursor = url.searchParams.get('cursor') || '', query = url.searchParams.get('q') || '', result = url.searchParams.get('result') || '';
+        const dates = auditDates(url.searchParams);
+        if (cursor && !/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z\|[a-f0-9]{64}$/.test(cursor)) fail(400, 'INVALID_FILTER', '日志分页位置不正确。');
         if (query.length > 100 || cursor.length > 100 || !['', 'success', 'denied', 'failed'].includes(result)) fail(400, 'INVALID_FILTER', '日志筛选条件不正确。');
         if (route === 'audit/export') {
           action = 'audit.export';
           const format = url.searchParams.get('format') || 'csv';
           if (!['csv', 'json'].includes(format)) fail(400, 'INVALID_EXPORT_FORMAT', '请选择 CSV 或 JSON 导出格式。');
-          const file = makeAuditExport(await audit.filtered({ query, result }), { format, query, result });
+          const file = makeAuditExport(await audit.filtered({ query, result, ...dates }), { format, query, result, from: url.searchParams.get('from') || '', to: url.searchParams.get('to') || '' });
+          if (Buffer.byteLength(file.content) > 5 * 1024 * 1024) fail(413, 'AUDIT_EXPORT_TOO_LARGE', '导出文件较大，请缩小日期范围后分批导出。');
           target = `${format.toUpperCase()} · 共 ${file.count} 条记录`; await record('success');
           return new Response(file.content, { headers: { 'Content-Type': file.mimeType, 'Content-Disposition': `attachment; filename="fengwei-operation-logs.${format}"; filename*=UTF-8''${encodeURIComponent(file.filename)}`, 'Cache-Control': 'private, no-store, max-age=0', Vary: 'Cookie', 'X-Content-Type-Options': 'nosniff', 'X-Audit-Count': String(file.count), ...(renewedCookie ? { 'Set-Cookie': renewedCookie } : {}) } });
         }
-        return reply({ userId: user.id, ...await audit.list({ cursor, query, result }) });
+        return reply({ userId: user.id, ...await audit.list({ cursor, query, result, ...dates }) });
       }
       if (route === 'activity' && method === 'POST') {
         const data = await body(request, 4096);
@@ -276,7 +282,7 @@ export function createApi({ database, password }) {
       fail(404, 'NOT_FOUND', '接口不存在，请确认已部署完整的峰味服务端。');
     } catch (error) {
       if (action) await record(error.status === 403 ? 'denied' : 'failed').catch(() => {});
-      if (error.status) return reply({ error: error.message, code: error.code || 'REQUEST_FAILED' }, error.status);
+      if (error.status) return reply({ error: error.message, code: error.code || 'REQUEST_FAILED' }, error.status, error.retryAfter ? { 'Retry-After': String(error.retryAfter) } : {});
       console.error('Fengwei storage error:', error.code || error.name);
       return json({ error: '服务器存储暂时不可用，数据尚未确认保存，请稍后重试。', code: 'STORAGE_UNAVAILABLE' }, 503);
     }

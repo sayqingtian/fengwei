@@ -1,6 +1,7 @@
 import { mkdir, readFile, writeFile, readdir, link, unlink, rename } from 'node:fs/promises';
 import { randomUUID } from 'node:crypto';
 import { dirname, resolve, sep } from 'node:path';
+import { AUDIT_PREFIX, auditMatches } from './audit-index.mjs';
 
 // Local development only. The cloud deployment uses EdgeOne Blob instead.
 export class FileStore {
@@ -23,5 +24,21 @@ export class FileStore {
     await mkdir(this.root, { recursive: true });
     const entries = await readdir(this.root, { recursive: true, withFileTypes: true });
     return { blobs: entries.filter(item => item.isFile() && !item.name.endsWith('.tmp')).map(item => ({ key: resolve(item.parentPath || item.path, item.name).slice(this.root.length + 1).replaceAll('\\', '/') })).filter(item => item.key.startsWith(prefix)) };
+  }
+  async queryAudit(options = {}) {
+    const { cursor = '', limit = 51 } = options;
+    const { blobs } = await this.list({ prefix: AUDIT_PREFIX });
+    const keys = blobs.map(item => item.key).filter(key => !cursor || key < `${AUDIT_PREFIX}${cursor}.json`).sort().reverse();
+    const rows = [];
+    for (const key of keys) {
+      const entry = await this.get(key, { type: 'json' });
+      if (entry && auditMatches(entry, options)) rows.push(entry);
+      if (rows.length >= limit) break;
+    }
+    return rows;
+  }
+  async clearAuditPending(key) {
+    if (!/^private\/audit-pending\/[a-f0-9]{64}\.json$/.test(key)) throw new Error('Invalid audit pending key');
+    await unlink(this.path(key)).catch(error => { if (error.code !== 'ENOENT') throw error; });
   }
 }

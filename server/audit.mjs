@@ -1,19 +1,13 @@
 import { randomUUID } from 'node:crypto';
 import { hash } from './database.mjs';
 
-export const AUDIT_ACTIONS = {
-  'account.register': '注册账号', 'account.login': '登录', 'account.logout': '退出登录',
-  'account.password': '修改密码', 'audit.export': '导出操作日志',
-  'account.recovery.request': '申请找回密码', 'account.recovery.reset': '管理员重置密码', 'account.recovery.reject': '拒绝找回申请',
-  'recipes.sync': '同步菜谱', 'recipe.view': '查看菜谱', 'recipe.history': '查看历史版本',
-  'recipe.create': '新增菜谱', 'recipe.update': '编辑菜谱', 'recipe.delete': '删除菜谱',
-  'recipe.restore': '恢复历史版本', 'recipe.import': '导入菜谱', 'recipe.favorite': '收藏操作',
-  'recipe.cook': '开始跟着做', 'backup.export': '导出备份',
-  'permission.request': '申请编辑权限', 'permission.approve': '批准编辑权限',
-  'permission.reject': '拒绝申请', 'permission.revoke': '撤销编辑权限',
-};
+import { AUDIT_ACTIONS } from './audit-actions.mjs';
+import { auditCursor, auditMatches, publicAudit, indexAudit } from './audit-index.mjs';
+export { AUDIT_ACTIONS } from './audit-actions.mjs';
+const legacyPrefixes = ['private/audit/', 'recipes/', 'private/permissions/', 'private/permission-requests/', 'private/password-changes/', 'private/password-recovery-requests/', 'private/deleted-users/'];
+const migrationKey = 'private/audit-migration/v1.json';
 export class AuditLog {
-  constructor(store) { this.store = store; }
+  constructor(store) { this.store = store; this.index = entry => store.indexAudit ? store.indexAudit(entry) : indexAudit(store, entry); }
   entry(user, action, { target = '', result = 'success', operationId, code = '' } = {}) {
     if (!Object.hasOwn(AUDIT_ACTIONS, action)) return;
     const id = hash(`${user?.id || 'anonymous'}:${action}:${operationId || randomUUID()}:${result}`);
@@ -25,10 +19,60 @@ export class AuditLog {
     const key = `private/audit/${id}.json`;
     if (options.operationId && await this.store.get(key, { type: 'json', consistency: 'strong' })) return;
     await this.store.setJSON(key, entry, { cacheControl: 'no-store' });
+    if (this.store.queryAudit && !this.store.indexAudit) await this.index(entry);
   }
-  async filtered({ query = '', result = '' } = {}) {
+  async prepare() {
+    if (!this.store.queryAudit) return { complete: true };
+    const pending = await this.store.list({ prefix: 'private/audit-pending/', consistency: 'strong' });
+    const repairing = Date.now(); let repaired = 0;
+    while (repaired < Math.min(pending.blobs.length, 100) && Date.now() - repairing < 3000) {
+      const batch = pending.blobs.slice(repaired, Math.min(repaired + 8, 100));
+      await Promise.all(batch.map(async ({ key }) => {
+        const entry = await this.store.get(key, { type: 'json', consistency: 'strong' });
+        if (entry) await this.index(entry);
+        await this.store.clearAuditPending(key);
+      }));
+      repaired += batch.length;
+    }
+    if (pending.blobs.length > repaired) return { complete: false, processed: repaired };
+    const state = await this.store.get(migrationKey, { type: 'json', consistency: 'strong' }) || { prefix: 0, cursor: '', processed: 0, complete: false };
+    if (state.complete) return state;
+    const started = Date.now(); let budget = 100;
+    while (state.prefix < legacyPrefixes.length && budget > 0 && Date.now() - started < 3000) {
+      const prefix = legacyPrefixes[state.prefix];
+      const { blobs } = await this.store.list({ prefix, consistency: 'strong' });
+      const keys = blobs.map(item => item.key).filter(key => key > state.cursor).sort();
+      const chosen = keys.slice(0, Math.min(8, budget));
+      await Promise.all(chosen.map(async key => {
+        const record = await this.store.get(key, { type: 'json', consistency: 'strong' });
+        const entry = prefix === 'private/audit/' ? record : record?.auditEntry;
+        if (entry) await this.index(entry);
+      }));
+      state.processed += chosen.length; budget -= chosen.length;
+      if (keys.length <= chosen.length) { state.prefix++; state.cursor = ''; }
+      else state.cursor = chosen.at(-1);
+    }
+    state.complete = state.prefix >= legacyPrefixes.length;
+    await this.store.setJSON(migrationKey, state, { cacheControl: 'no-store' });
+    return state;
+  }
+  async filtered({ query = '', result = '', from = '', to = '' } = {}) {
+    if (this.store.queryAudit) {
+      const progress = await this.prepare();
+      if (!progress.complete) throw Object.assign(new Error('历史日志正在整理，请等待日志列表加载完成后再导出。'), { status: 503, code: 'AUDIT_INDEX_BUILDING' });
+      const records = []; let cursor = '', bytes = 0;
+      do {
+        const batch = await this.store.queryAudit({ query, result, from, to, cursor, limit: 250 });
+        for (const item of batch) {
+          const entry = publicAudit(item); bytes += Buffer.byteLength(JSON.stringify(entry)); records.push(entry);
+          if (records.length > 10000 || bytes > 4 * 1024 * 1024) throw Object.assign(new Error('日志较多，请缩小日期范围后分批导出（每次最多 10000 条）。'), { status: 413, code: 'AUDIT_EXPORT_TOO_LARGE' });
+        }
+        cursor = batch.length === 250 ? auditCursor(batch.at(-1)) : '';
+      } while (cursor);
+      return records;
+    }
     const entries = new Map();
-    for (const prefix of ['private/audit/', 'recipes/', 'private/permissions/', 'private/permission-requests/', 'private/password-changes/', 'private/password-recovery-requests/']) {
+    for (const prefix of legacyPrefixes) {
       const { blobs } = await this.store.list({ prefix, consistency: 'strong' });
       const records = await Promise.all(blobs.map(({ key }) => this.store.get(key, { type: 'json', consistency: 'strong' })));
       for (const record of records) {
@@ -36,13 +80,19 @@ export class AuditLog {
         if (item && !entries.has(item.id)) entries.set(item.id, item);
       }
     }
-    const terms = query.trim().toLowerCase().split(/\s+/).filter(Boolean);
     return [...entries.values()]
-      .filter(item => (!result || item.result === result) && terms.every(term => `${item.displayName} ${item.userId} ${AUDIT_ACTIONS[item.action]} ${item.target}`.toLowerCase().includes(term)))
+      .filter(item => auditMatches({ ...item, searchText: `${item.displayName} ${item.userId} ${AUDIT_ACTIONS[item.action]} ${item.target}`.toLowerCase() }, { query, result, from, to }))
       .sort((a, b) => b.createdAt.localeCompare(a.createdAt) || b.id.localeCompare(a.id));
   }
-  async list({ cursor = '', query = '', result = '' } = {}) {
-    const all = await this.filtered({ query, result });
+  async list({ cursor = '', query = '', result = '', from = '', to = '' } = {}) {
+    if (this.store.queryAudit) {
+      const progress = await this.prepare();
+      if (!progress.complete) return { items: [], cursor: null, indexing: { processed: progress.processed } };
+      const rows = await this.store.queryAudit({ cursor, query, result, from, to, limit: 51 });
+      const items = rows.slice(0, 50).map(publicAudit);
+      return { items, cursor: rows.length > 50 ? auditCursor(items.at(-1)) : null };
+    }
+    const all = await this.filtered({ query, result, from, to });
     const filtered = all.filter(item => !cursor || `${item.createdAt}|${item.id}` < cursor);
     const items = filtered.slice(0, 50);
     return { items, cursor: filtered.length > 50 ? `${items.at(-1).createdAt}|${items.at(-1).id}` : null };
