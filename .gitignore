@@ -8,3 +8,6 @@ artifacts/
 .env.*
 !.env.example
 .data/
+
+# Generated image codecs; rebuilt by npm run assets.
+dist/codecs/

@@ -1,10 +1,13 @@
 import { myPages, roleName } from './my.js';
 import { recoveryPages } from './recovery.js';
-import { CATEGORIES, createId, openStore, validateRecipe, filterRecipes, makeBackup, parseBackup, planImport, isPhoto } from './store.js';
+import { compressPhoto, optimizeDataPhoto, photoSize } from './photo.js';
+import { imagePage } from './photos-page.js';
+import { CATEGORIES, createId, openStore, validateRecipe, filterRecipes, makeBackup, parseBackup, planImport } from './store.js';
 
 const $ = (selector, root = document) => root.querySelector(selector);
 const esc = value => String(value ?? '').replace(/[&<>"']/g, char => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[char]);
 let accountDeletion = null;
+let imageData = null, imageBusy = false, imageStop = false, imageProgress = '', imageError = '', imageSaved = 0;
 const paths = {
   bowl: '<path d="M3 11h18c-.6 6-4.1 9-9 9s-8.4-3-9-9Z"/><path d="M9 23h6M8 7c-3-3 3-3 0-6M13 7c-3-3 3-3 0-6"/>',
   book: '<path d="M4 3h13a3 3 0 0 1 3 3v15H6a3 3 0 0 1-3-3V6a3 3 0 0 1 1-3Z"/><path d="M7 3v14M3 17h17M11 7h5M11 10h4"/>',
@@ -56,11 +59,11 @@ function toast(message) {
 }
 
 function nav(mobile = false) {
-  return `<nav class="${mobile ? 'mobile-nav' : 'desktop-nav'}" aria-label="${mobile ? '底部' : '主'}导航">${[['recipes', 'book', '菜谱本'], ['favorites', 'heart', '收藏夹'], ['my', 'people', '我的']].map(([id, mark, name]) => `<button class="nav-item ${(page === id || (id === 'my' && ['backup', 'account', 'permissions', 'logs', 'recovery'].includes(page))) ? 'active' : ''}" data-action="navigate" data-page="${id}" ${(page === id || (id === 'my' && ['backup', 'account', 'permissions', 'logs', 'recovery'].includes(page))) ? 'aria-current="page"' : ''}>${icon(mark)}<span>${name}</span></button>`).join('')}</nav>`;
+  return `<nav class="${mobile ? 'mobile-nav' : 'desktop-nav'}" aria-label="${mobile ? '底部' : '主'}导航">${[['recipes', 'book', '菜谱本'], ['favorites', 'heart', '收藏夹'], ['my', 'people', '我的']].map(([id, mark, name]) => `<button class="nav-item ${(page === id || (id === 'my' && ['backup', 'account', 'permissions', 'logs', 'recovery', 'images'].includes(page))) ? 'active' : ''}" data-action="navigate" data-page="${id}" ${(page === id || (id === 'my' && ['backup', 'account', 'permissions', 'logs', 'recovery', 'images'].includes(page))) ? 'aria-current="page"' : ''}>${icon(mark)}<span>${name}</span></button>`).join('')}</nav>`;
 }
 
 function render() {
-  $('#app').innerHTML = `<a class="skip-link" href="#main">跳到菜谱内容</a><div class="shell"><header class="header"><div class="brand"><div class="brand-icon">${icon('bowl')}</div><div><div class="brand-name">峰味</div><div class="brand-caption">共享菜谱，自己的收藏</div></div></div>${nav()}<span class="private-pill">${icon('people')}共享菜谱 · 独立收藏</span></header>${syncBar()}<main id="main">${page === 'my' ? my.overview(db?.user, recipes.filter(item => item.favorite).length, recoveryData?.requests.filter(item => item.status === 'pending').length || 0) : page === 'backup' ? my.back() + backupPage() : page === 'account' ? my.back() + accountPage() : page === 'permissions' ? my.permissions(db?.user, permissionData, permissionError) : page === 'recovery' ? my.back() + recoveryView.inbox(db?.user, recoveryData, { error: recoveryError, loading: recoveryLoading }) : page === 'logs' ? my.logs(db?.user, auditData, { query: auditQuery, result: auditResult, from: auditFrom, to: auditTo, error: auditError, loading: auditLoading, exporting: auditExportBusy }) : recipePage()}</main><footer class="footer"><span>一餐一饭，都是生活的小事。</span><span>${icon('leaf')}把好味道分享给彼此</span></footer></div>${nav(true)}`;
+  $('#app').innerHTML = `<a class="skip-link" href="#main">跳到菜谱内容</a><div class="shell"><header class="header"><div class="brand"><div class="brand-icon">${icon('bowl')}</div><div><div class="brand-name">峰味</div><div class="brand-caption">共享菜谱，自己的收藏</div></div></div>${nav()}<span class="private-pill">${icon('people')}共享菜谱 · 独立收藏</span></header>${syncBar()}<main id="main">${page === 'my' ? my.overview(db?.user, recipes.filter(item => item.favorite).length, recoveryData?.requests.filter(item => item.status === 'pending').length || 0) : page === 'backup' ? my.back() + backupPage() : page === 'account' ? my.back() + accountPage() : page === 'permissions' ? my.permissions(db?.user, permissionData, permissionError) : page === 'recovery' ? my.back() + recoveryView.inbox(db?.user, recoveryData, { error: recoveryError, loading: recoveryLoading }) : page === 'images' ? my.back() + imagePage({ user: db?.user, data: imageData, busy: imageBusy, progress: imageProgress, error: imageError, saved: imageSaved }) : page === 'logs' ? my.logs(db?.user, auditData, { query: auditQuery, result: auditResult, from: auditFrom, to: auditTo, error: auditError, loading: auditLoading, exporting: auditExportBusy }) : recipePage()}</main><footer class="footer"><span>一餐一饭，都是生活的小事。</span><span>${icon('leaf')}把好味道分享给彼此</span></footer></div>${nav(true)}`;
   if (['recipes', 'favorites'].includes(page)) renderResults();
 }
 
@@ -109,8 +112,9 @@ async function login(form) {
       await db.register($('#register-name').value.trim(), $('#access-password').value, registrationId);
       page = 'account';
     } else await db.login($('#login-username').value.trim(), $('#access-password').value);
+    imageStop = true; imageData = null;
     permissionData = null; auditData = null; recoveryData = null; recoveryError = ''; auditQuery = ''; auditResult = ''; auditFrom = ''; auditTo = '';
-    if (['permissions', 'logs', 'recovery'].includes(page)) page = 'my';
+    if (['permissions', 'logs', 'recovery', 'images'].includes(page)) page = 'my';
     channel?.postMessage({ type: 'account-changed', userId: db.user.id });
     await refresh();
     $('#access-password').value = ''; $('#auth-root').innerHTML = '';
@@ -222,27 +226,9 @@ function showEditor(id) {
 
 function photoUploader() {
   const photo = editor.recipe.photo;
-  return `${photo ? `<img src="${esc(photo)}" alt="菜谱封面预览"><div class="photo-actions"><label for="photo-input" class="button ghost">更换照片</label><button type="button" class="button ghost" data-action="remove-photo">移除照片</button></div>` : `<label for="photo-input">${icon('photo')}<span>给这道菜留一张照片</span><small>从相册选择 · 也可以以后再加</small></label>`}<input type="file" id="photo-input" accept="image/*" hidden>`;
+  return `${photo ? `<img src="${esc(photo)}" alt="菜谱封面预览"><div class="photo-actions"><label for="photo-input" class="button ghost">更换照片</label><button type="button" class="button ghost" data-action="remove-photo">移除照片</button></div>` : `<label for="photo-input">${icon('photo')}<span>给这道菜留一张照片</span><small>从相册选择 · 也可以以后再加</small></label>`}<input type="file" id="photo-input" accept="image/*" hidden>${editor.photoInfo ? `<span class="photo-size-note" role="status">${esc(editor.photoInfo)}</span>` : ''}`;
 }
 
-async function compressPhoto(file) {
-  if (file.size > 20 * 1024 * 1024) throw new Error('照片超过 20 MB，请选择较小的照片');
-  if (!file.type.startsWith('image/')) throw new Error('请选择一张照片');
-  const url = URL.createObjectURL(file);
-  try {
-    const image = new Image(); image.src = url;
-    await new Promise((resolve, reject) => { image.onload = resolve; image.onerror = () => reject(new Error('这张照片暂时无法读取，请改用 JPEG 或 PNG 格式')); });
-    if (!image.naturalWidth || !image.naturalHeight) throw new Error('照片尺寸不正确');
-    const ratio = Math.min(1, 1600 / Math.max(image.naturalWidth, image.naturalHeight));
-    const canvas = document.createElement('canvas'); canvas.width = Math.max(1, Math.round(image.naturalWidth * ratio)); canvas.height = Math.max(1, Math.round(image.naturalHeight * ratio));
-    const context = canvas.getContext('2d'); if (!context) throw new Error('照片处理未完成，请重试');
-    context.fillStyle = '#fffefb'; context.fillRect(0, 0, canvas.width, canvas.height); context.drawImage(image, 0, 0, canvas.width, canvas.height);
-    let photo = canvas.toDataURL('image/jpeg', .82);
-    if (photo.length > 3 * 1024 * 1024) photo = canvas.toDataURL('image/jpeg', .65);
-    if (!isPhoto(photo) || photo.length > 3 * 1024 * 1024) throw new Error('照片处理后仍然过大，请选择较小的照片');
-    return photo;
-  } finally { URL.revokeObjectURL(url); }
-}
 
 function renumberRows() {
   document.querySelectorAll('.step-row').forEach((row, index) => {
@@ -349,6 +335,10 @@ async function applyImport(button) {
   button.disabled = true; button.textContent = '正在导入…';
   try {
     const plan = planImport(await db.all(), pendingImport);
+    for (let i = 0; i < plan.writes.length; i++) if (plan.writes[i].photo) {
+      button.textContent = `正在优化导入图片 ${i + 1}/${plan.writes.length}…`;
+      plan.writes[i] = { ...plan.writes[i], photo: (await optimizeDataPhoto(plan.writes[i].photo)).photo };
+    }
     await db.import(plan.writes, { favorites: pendingImport }); pendingImport = null; await changed();
     toast(`导入完成：新增 ${plan.added} 道，更新 ${plan.updated} 道`);
   } catch (error) { button.disabled = false; button.textContent = '确认导入'; throw error; }
@@ -523,6 +513,46 @@ async function submitPasswordChange(form) {
   }
 }
 
+
+async function loadImages() {
+  if (imageBusy || db.user?.role !== 'admin') return;
+  imageBusy = true; imageError = ''; imageData = null; imageProgress = '正在统计图片空间…'; render();
+  const userId = db.user.id, items = []; let cursor = '';
+  try {
+    do {
+      const result = await db.photoInventory(cursor);
+      if (db.user?.id !== userId) return;
+      items.push(...result.items); cursor = result.cursor;
+      imageProgress = `正在统计图片 ${items.length}/${result.total}…`; if (page === 'images') render();
+    } while (cursor);
+    imageData = { items, bytes: items.reduce((sum, item) => sum + item.bytes, 0) };
+  } catch (error) { imageError = errorText(error); }
+  finally { imageBusy = false; imageProgress = ''; if (page === 'images') render(); }
+}
+async function optimizeImages() {
+  if (imageBusy || db.user?.role !== 'admin' || !imageData) return;
+  const pending = imageData.items.filter(item => !item.optimized);
+  if (!pending.length) return;
+  if (!await ask('优化已有图片', `将处理 ${pending.length} 张图片，替换为更小的版本并释放旧文件空间。当前菜谱和历史版本仍可显示图片，但原图画质无法从网站恢复。建议先保存独立备份。`, '开始优化')) return;
+  imageBusy = true; imageStop = false; imageError = ''; imageSaved = 0; const userId = db.user.id;
+  let done = 0;
+  try {
+    for (const item of pending) {
+      if (imageStop || db.user?.id !== userId) break;
+      imageProgress = `正在优化 ${done + 1}/${pending.length}，已释放 ${photoSize(imageSaved)}`; if (page === 'images') render();
+      const original = await db.image(item.hash), result = await optimizeDataPhoto(original);
+      if (imageStop || db.user?.id !== userId) break;
+      const saved = await db.optimizeImage(item.hash, result.photo); imageSaved += saved.savedBytes || 0; done++;
+    }
+    imageProgress = `${imageStop ? '已停止' : '优化完成'}：处理 ${done} 张，释放 ${photoSize(imageSaved)}`;
+    recipes = await db.all(); channel?.postMessage('changed');
+  } catch (error) { imageError = `已完成 ${done} 张，释放 ${photoSize(imageSaved)}。${errorText(error)} 可刷新后继续。`; }
+  finally {
+    imageBusy = false;
+    if (db.user?.id === userId) { const result = imageProgress, problem = imageError; await loadImages(); imageProgress = result; imageError ||= problem; if (page === 'images') render(); }
+  }
+}
+
 async function exportAudit(format) {
   if (auditExportBusy || db.user?.role !== 'admin') return;
   auditExportBusy = true; render();
@@ -565,6 +595,7 @@ async function handleAction(button) {
       break;
     case 'sync': button.disabled = true; try { await refresh(); toast(db.readOnly ? '服务器暂不可达，正在查看缓存。' : '已读取服务器上的最新菜谱'); } finally { if (button.isConnected) button.disabled = false; } break;
     case 'logout': {
+      imageStop = true; imageData = null;
       permissionData = null; auditData = null; recoveryData = null; recoveryError = ''; auditQuery = ''; auditResult = ''; auditFrom = ''; auditTo = '';
       const cleared = await db.logout(); recipes = []; pendingImport = null; historyItems = []; page = 'recipes'; legacyCount = 0;
       channel?.postMessage({ type: 'account-changed', userId: null }); render();
@@ -578,8 +609,12 @@ async function handleAction(button) {
       page = button.dataset.page; query = ''; category = '全部'; pendingImport = null; render(); window.scrollTo(0, 0);
       if (page === 'permissions') await loadPermissions();
       if (page === 'logs') await loadLogs();
+      if (page === 'images') await loadImages();
       if (page === 'recovery' || (page === 'my' && db.user?.role === 'admin')) await loadRecoveries();
       break;
+    case 'reload-images': await loadImages(); break;
+    case 'optimize-images': await optimizeImages(); break;
+    case 'stop-images': imageStop = true; imageProgress = '正在完成当前图片，随后停止…'; render(); break;
     case 'reload-permissions': await loadPermissions(); break;
     case 'permission-decision': showPermissionDecision(button.dataset); break;
     case 'account-delete': showAccountDeletion(button.dataset); break;
@@ -596,7 +631,7 @@ async function handleAction(button) {
     case 'add-step': if ($('#step-rows').children.length >= 100) { toast('最多记录 100 个步骤'); break; } $('#step-rows').insertAdjacentHTML('beforeend', stepRow()); editor.dirty = true; renumberRows(); $('#step-rows').lastElementChild.querySelector('textarea').focus(); break;
     case 'remove-ingredient': button.closest('.ingredient-row').remove(); editor.dirty = true; renumberRows(); break;
     case 'remove-step': button.closest('.step-row').remove(); editor.dirty = true; renumberRows(); break;
-    case 'remove-photo': if (editor.processingPhoto) break; editor.recipe.photo = ''; editor.dirty = true; $('#photo-uploader').innerHTML = photoUploader(); break;
+    case 'remove-photo': if (editor.processingPhoto) break; editor.recipe.photo = ''; editor.photoInfo = ''; editor.dirty = true; $('#photo-uploader').innerHTML = photoUploader(); break;
     case 'delete': await deleteRecipe(id); break;
     case 'cook': await startCook(id); db.activity('recipe.cook', id).catch(() => {}); break;
     case 'cook-back': if (cookStep > 0) { cookStep--; renderCook(); } break;
@@ -629,8 +664,9 @@ document.addEventListener('change', async event => {
       const currentEditor = editor;
       currentEditor.processingPhoto = true; $('#save-recipe').disabled = true; toast('正在处理照片…');
       try {
-        const photo = await compressPhoto(event.target.files[0]);
-        if (editor === currentEditor) { editor.recipe.photo = photo; editor.dirty = true; $('#photo-uploader').innerHTML = photoUploader(); toast('照片已准备好，保存菜谱后一起留存'); }
+        const result = await compressPhoto(event.target.files[0], toast);
+        const photo = result.photo; currentEditor.photoInfo = `${result.type.split('/')[1].toUpperCase()} · ${result.width} × ${result.height} · ${photoSize(result.bytes)}`;
+        if (editor === currentEditor) { editor.recipe.photo = photo; editor.dirty = true; $('#photo-uploader').innerHTML = photoUploader(); toast(`照片已优化：${photoSize(result.originalBytes)} → ${photoSize(result.bytes)}`); }
       } finally { currentEditor.processingPhoto = false; if (editor === currentEditor) $('#save-recipe').disabled = false; }
     }
   } catch (error) { toast(errorText(error)); }
@@ -660,7 +696,7 @@ document.addEventListener('keydown', event => {
   if (event.shiftKey && (document.activeElement === first || !controls.includes(document.activeElement))) { event.preventDefault(); last?.focus(); }
   else if (!event.shiftKey && document.activeElement === last) { event.preventDefault(); first?.focus(); }
 });
-window.addEventListener('beforeunload', event => { if (editor?.dirty) { event.preventDefault(); event.returnValue = ''; } });
+window.addEventListener('beforeunload', event => { if (editor?.dirty || imageBusy) { event.preventDefault(); event.returnValue = ''; } });
 window.addEventListener('online', () => { toast('网络已连接，请同步服务器菜谱后再修改。'); if (db && !editor && !$('#modal-root').hasChildNodes() && !$('#auth-root').hasChildNodes()) refresh().catch(error => toast(errorText(error))); });
 window.addEventListener('offline', () => toast('已离线，已同步的菜谱仍可查看；修改需要联网保存。'));
 window.addEventListener('fengwei:permissions-changed', () => { permissionData = null; render(); });
@@ -669,6 +705,7 @@ window.addEventListener('fengwei:login-required', async () => {
   if (recoveryForm || $('#recovery-result-password')) { recoveryForm?.reset(); recoveryBusy = false; await closeModal(); }
   const passwordForm = $('#password-change-form');
   if (passwordForm) { passwordForm.reset(); passwordBusy = false; await closeModal(); }
+  imageStop = true; imageData = null;
   permissionData = null; auditData = null; recoveryData = null; recoveryError = '';
   recipes = []; pendingImport = null; historyItems = []; render();
   showLogin(editor ? '登录已失效，请使用当前密码重新登录。正在编辑的内容会保留。' : '登录已失效，请使用当前密码重新登录。');
@@ -685,6 +722,7 @@ channel?.addEventListener('message', async event => {
       if (recoveryForm || $('#recovery-result-password')) { recoveryForm?.reset(); recoveryBusy = false; await closeModal(); }
       const passwordForm = $('#password-change-form');
       if (passwordForm) { passwordForm.reset(); passwordBusy = false; await closeModal(); }
+      imageStop = true; imageData = null;
       permissionData = null; auditData = null; recoveryData = null; recoveryError = '';
       await db.forget(false); recipes = []; pendingImport = null; historyItems = []; render();
       if (!event.data.userId) { showLogin('账号已在其他页面退出，请重新登录。'); return; }

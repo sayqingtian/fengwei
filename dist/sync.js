@@ -1,4 +1,5 @@
 import { createId, validateRecipe } from './store.js';
+import { PHOTO_PACKET_TYPE, packPhotos, unpackPhotos, splitPhoto, joinPhoto } from './photo-wire.js';
 
 const CACHE_KEY = 'fengwei-server-cache-v2';
 const OLD_CACHE_KEY = 'fengwei-server-cache-v1';
@@ -19,6 +20,7 @@ export async function createRemoteStore(local) {
   let offline = false, authenticated = false, user = snapshot?.user || null;
   let records = snapshot?.recipes || [], revisions = Object.assign(Object.create(null), snapshot?.revisions || {});
   let hashes = Object.assign(Object.create(null), snapshot?.photoHashes || {}), conflicts = [];
+  let photoVersion = snapshot?.photoVersion || '';
   const photoCache = new Map();
   for (const recipe of records) { const key = hashes[recipe.id]; if (key && recipe.photo) photoCache.set(key, recipe.photo); }
   let cacheWarning = !local;
@@ -35,10 +37,10 @@ export async function createRemoteStore(local) {
     return pending;
   }
   const photoLoads = new Map();
-  let batchPhotos = true, photoReferences = false;
+  let batchPhotos = true, photoReferences = false, binaryPhotos = false;
   const apiBase = new URL('./api/', import.meta.url);
   function resetMemory() {
-    accountEpoch++; photoLoads.clear(); photoReferences = false;
+    accountEpoch++; photoLoads.clear(); photoReferences = false; binaryPhotos = false;
     snapshot = null; records = []; revisions = Object.create(null); hashes = Object.create(null);
     conflicts = []; photoCache.clear(); user = null; authenticated = false; offline = false;
   }
@@ -55,15 +57,23 @@ export async function createRemoteStore(local) {
     if (user?.id !== nextUser.id) await forget();
     user = nextUser;
   }
-  async function request(path, { method = 'GET', value } = {}) {
+  async function request(path, { method = 'GET', value, binary, receivePhotos = false } = {}) {
     const epoch = accountEpoch;
     for (let attempt = 0; attempt < 3; attempt++) {
       let response;
       try {
-        response = await fetch(new URL(path, apiBase), { method, credentials: 'same-origin', cache: 'no-store', headers: value === undefined ? {} : { 'Content-Type': 'application/json' }, ...(value === undefined ? {} : { body: JSON.stringify(value) }), signal: AbortSignal.timeout(25000) });
+        response = await fetch(new URL(path, apiBase), { method, credentials: 'same-origin', cache: 'no-store', headers: { ...(receivePhotos ? { Accept: PHOTO_PACKET_TYPE } : {}), ...(binary ? { 'Content-Type': PHOTO_PACKET_TYPE } : value === undefined ? {} : { 'Content-Type': 'application/json' }) }, ...(binary ? { body: binary } : value === undefined ? {} : { body: JSON.stringify(value) }), signal: AbortSignal.timeout(25000) });
       } catch { throw new ApiError('服务器暂时连不上。缓存仍可查看，修改需要联网后再保存。', 0, 'NETWORK'); }
       let data;
-      try { data = await response.json(); } catch { throw new ApiError('服务器接口未就绪，请确认上传了包含云函数的完整峰味部署包。', response.status, 'INVALID_RESPONSE'); }
+      try {
+        if (response.ok && response.headers.get('content-type') === PHOTO_PACKET_TYPE) {
+          const packet = unpackPhotos(await response.arrayBuffer()); data = packet.metadata;
+          if (Array.isArray(data.hashes)) {
+            if (data.hashes.length !== packet.photos.length) throw new Error('Photo count mismatch');
+            data.photos = Object.fromEntries(data.hashes.map((hash, i) => [hash, joinPhoto(packet.photos[i])]));
+          } else data.photo = joinPhoto(packet.photos[0]);
+        } else data = await response.json();
+      } catch { throw new ApiError('服务器接口未就绪，请确认上传了包含云函数的完整峰味部署包。', response.status, 'INVALID_RESPONSE'); }
       if (epoch !== accountEpoch) throw new ApiError('账号已切换，本次请求已取消。', 409, 'ACCOUNT_CHANGED');
       // Retries preserve the exact registration/mutation ID. These errors occur
       // before the platform's request body is available for a server mutation.
@@ -92,7 +102,7 @@ export async function createRemoteStore(local) {
     }
   }
   async function persist() {
-    snapshot = { user, recipes: records, revisions, photoHashes: hashes, authenticatedAt: Date.now() };
+    snapshot = { user, recipes: records, revisions, photoHashes: hashes, photoVersion, authenticatedAt: Date.now() };
     if (local) {
       try { await local.setSetting(CACHE_KEY, snapshot); cacheWarning = false; }
       catch { cacheWarning = true; }
@@ -106,7 +116,7 @@ export async function createRemoteStore(local) {
       if (!photo) {
         const key = item.photoHash;
         if (!photoLoads.has(key)) {
-          const loading = request(`photo/${key}`).then(data => { photoCache.set(key, data.photo); return data.photo; }).finally(() => { if (photoLoads.get(key) === loading) photoLoads.delete(key); });
+          const loading = request(`photo/${key}`, { receivePhotos: binaryPhotos }).then(async data => { await sameAccount(data); photoCache.set(key, data.photo); return data.photo; }).finally(() => { if (photoLoads.get(key) === loading) photoLoads.delete(key); });
           photoLoads.set(key, loading);
         }
         photo = await photoLoads.get(key);
@@ -122,7 +132,7 @@ export async function createRemoteStore(local) {
       let pending = hashes;
       while (pending.length) {
         let data;
-        try { data = await request('photos', { method: 'POST', value: { hashes: pending } }); }
+        try { data = await request('photos', { method: 'POST', value: { hashes: pending }, receivePhotos: binaryPhotos }); }
         catch (error) { if (error.status === 404 && error.code === 'NOT_FOUND') { batchPhotos = false; return; } throw error; }
         await sameAccount(data);
         for (const [key, photo] of Object.entries(data.photos || {})) if (pending.includes(key)) photoCache.set(key, photo);
@@ -139,7 +149,9 @@ export async function createRemoteStore(local) {
     ensureOnline();
     const valid = recipe ? validateRecipe(recipe) : null;
     const reused = photoReferences && valid?.photo && hashes[id] && photoCache.get(hashes[id]) === valid.photo ? hashes[id] : '';
-    const data = await request(`recipe/${encodeURIComponent(id)}`, { method, value: { ...(valid ? { recipe: { ...valid, photo: reused ? '' : valid.photo } } : {}), ...(reused ? { photoHash: reused } : {}), baseRevision: Object.hasOwn(options, 'baseRevision') ? options.baseRevision : revisions[id] || null, mutationId: createId(), ...(options.operation ? { operation: options.operation } : {}) } });
+    const value = { ...(valid ? { recipe: { ...valid, photo: reused ? '' : valid.photo } } : {}), ...(reused ? { photoHash: reused } : {}), expectedUserId: user?.id, baseRevision: Object.hasOwn(options, 'baseRevision') ? options.baseRevision : revisions[id] || null, mutationId: createId(), ...(options.operation ? { operation: options.operation } : {}) };
+    const binary = binaryPhotos && valid?.photo && !reused ? packPhotos({ ...value, recipe: { ...value.recipe, photo: '' } }, [splitPhoto(valid.photo)]) : undefined;
+    const data = await request(`recipe/${encodeURIComponent(id)}`, { method, value, binary });
     await sameAccount(data);
     const item = data.item;
     revisions[id] = item.revision; hashes[id] = item.photoHash;
@@ -176,6 +188,10 @@ export async function createRemoteStore(local) {
         }
         await sameAccount(data);
         photoReferences = data.capabilities?.photoReferences === true;
+        binaryPhotos = data.capabilities?.binaryPhotos === true;
+        if ((data.capabilities?.photoVersion || '') !== photoVersion) {
+          photoCache.clear(); photoVersion = data.capabilities?.photoVersion || '';
+        }
         await loadPhotos(data.items);
         const hydrated = await parallel(data.items, hydrate);
         if (job.epoch !== accountEpoch) throw new ApiError('账号已切换，本次同步已取消。', 409, 'ACCOUNT_CHANGED');
@@ -256,6 +272,15 @@ export async function createRemoteStore(local) {
     async requestPermission(reason, requestId) { ensureOnline(); const data = await request('permissions/request', { method: 'POST', value: { reason, requestId } }); await sameAccount(data); return data; },
     async decidePermission(value) { ensureOnline(); const data = await request('permissions/decision', { method: 'POST', value }); await sameAccount(data); return data; },
     async deleteAccounts(value) { ensureOnline(); const data = await request('accounts/delete', { method: 'POST', value: { ...value, expectedUserId: user?.id } }); await sameAccount(data); return data; },
+    async photoInventory(cursor = '') { ensureOnline(); const data = await request(`admin/photos?cursor=${encodeURIComponent(cursor)}`); await sameAccount(data); return data; },
+    async image(hash) { ensureOnline(); const data = await request(`photo/${hash}`, { receivePhotos: true }); await sameAccount(data); return data.photo; },
+    optimizeImage(hash, photo) {
+      return mutate(async () => {
+        ensureOnline(); const binary = packPhotos({ expectedUserId: user?.id }, [splitPhoto(photo)]);
+        const data = await request(`admin/photos/${hash}`, { method: 'PUT', binary }); await sameAccount(data);
+        photoCache.clear(); return data.result;
+      });
+    },
     async audit({ cursor = '', query = '', result = '', from = '', to = '' } = {}) {
       ensureOnline(); const params = new URLSearchParams({ cursor, q: query, result, from, to });
       const data = await request(`audit?${params}`); await sameAccount(data); return data;

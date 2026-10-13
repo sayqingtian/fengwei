@@ -13,7 +13,7 @@ export const createId = () => {
   }
   return `recipe-${Date.now()}-${Math.random().toString(36).slice(2)}`;
 };
-export const isPhoto = value => typeof value === 'string' && /^data:image\/(jpeg|png|webp);base64,[A-Za-z0-9+/=\r\n]+$/.test(value) && value.length <= 8000000;
+export const isPhoto = value => typeof value === 'string' && /^data:image\/(jpeg|png|webp|avif);base64,[A-Za-z0-9+/=\r\n]+$/.test(value) && value.length <= 8000000;
 
 function string(value, label, max = MAX_TEXT) {
   if (typeof value !== 'string' || value.length > max) throw new Error(`${label}格式不正确或内容过长`);

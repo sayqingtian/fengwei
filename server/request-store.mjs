@@ -1,7 +1,7 @@
 import { AsyncLocalStorage } from 'node:async_hooks';
 import { indexAudit } from './audit-index.mjs';
 
-const immutable = key => /^recipes\/[a-f0-9]{64}\/\d{12}-\d{13}-[a-zA-Z0-9-]+\.json$/.test(key) || /^photos\/[a-f0-9]{64}\.txt$/.test(key) || /^private\/auth\/[a-f0-9]{64}\/\d{13}-[a-f0-9-]{36}\.json$/.test(key) || /^private\/permissions\/usr_[a-f0-9]{32}\/\d{12}-\d{13}-[a-zA-Z0-9-]+\.json$/.test(key) || /^private\/favorites\/usr_[a-f0-9]{32}\/[a-f0-9]{64}\/\d{13}-[a-zA-Z0-9-]+\.json$/.test(key);
+const immutable = key => /^recipes\/[a-f0-9]{64}\/\d{12}-\d{13}-[a-zA-Z0-9-]+\.json$/.test(key) || /^photos\/[a-f0-9]{64}\.(?:txt|bin)$/.test(key) || /^private\/auth\/[a-f0-9]{64}\/\d{13}-[a-f0-9-]{36}\.json$/.test(key) || /^private\/permissions\/usr_[a-f0-9]{32}\/\d{12}-\d{13}-[a-zA-Z0-9-]+\.json$/.test(key) || /^private\/favorites\/usr_[a-f0-9]{32}\/[a-f0-9]{64}\/\d{13}-[a-zA-Z0-9-]+\.json$/.test(key);
 
 export function requestStore(source) {
   const context = new AsyncLocalStorage(), retained = new Map();
@@ -9,7 +9,7 @@ export function requestStore(source) {
   const clone = value => value === undefined ? undefined : structuredClone(value);
   function retain(key, value) {
     if (value === null || value === undefined) return;
-    const size = Buffer.byteLength(typeof value === 'string' ? value : JSON.stringify(value));
+    const size = value instanceof ArrayBuffer || ArrayBuffer.isView(value) ? value.byteLength : Buffer.byteLength(typeof value === 'string' ? value : JSON.stringify(value));
     if (size > 8 * 1024 * 1024) return;
     const previous = retained.get(key); if (previous) { bytes -= previous.size; retained.delete(key); }
     retained.set(key, { value: clone(value), size, expires: Date.now() + 300000 }); bytes += size;
@@ -66,6 +66,7 @@ export function requestStore(source) {
     },
     async set(key, value, options) { invalidate(); const result = await source.set(key, value, options); invalidate(); return result; },
     async setJSON(key, value, options) { invalidate(); const result = await source.setJSON(key, value, options); invalidate(); await indexReceipt(key, value); return result; },
+    async delete(key) { invalidate(); const result = await source.delete(key); invalidate(); for (const [cacheKey, item] of retained) if (JSON.parse(cacheKey)[0] === key) { bytes -= item.size; retained.delete(cacheKey); } return result; },
   };
   if (source.accountSnapshot) store.accountSnapshot = id => memo('accounts', id, () => source.accountSnapshot(id));
   if (source.consumeRateLimit) store.consumeRateLimit = (key, options) => source.consumeRateLimit(key, options);

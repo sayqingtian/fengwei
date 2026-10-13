@@ -1,7 +1,8 @@
 import { hash, RecipeDatabase } from './database.mjs';
 import { validateRecipe } from '../dist/store.js';
 import { createAuth, testAccount, sessionCookie } from './auth.mjs';
-import { readJsonBody as body } from './json-body.mjs';
+import { readJsonBody as body, readBodyBytes } from './json-body.mjs';
+import { PHOTO_PACKET_TYPE, packPhotos, unpackPhotos, joinPhoto } from '../dist/photo-wire.js';
 import { publicUser, requireUniqueWrites } from './accounts.mjs';
 import { Favorites } from './favorites.mjs';
 import { AuditLog } from './audit.mjs';
@@ -51,6 +52,11 @@ export function createApi({ database, password }) {
       catch (error) { console.error('Fengwei audit index unavailable:', error.code || error.name); }
     };
     const reply = (value, status = 200, headers = {}) => json(value, status, { 'Server-Timing': `app;dur=${(performance.now() - started).toFixed(1)}`, ...(renewedCookie ? { 'Set-Cookie': renewedCookie } : {}), ...headers });
+    const binaryReply = (bytes, type) => new Response(bytes, { headers: { 'Content-Type': type, 'Cache-Control': 'private, no-store, max-age=0', 'Vary': 'Cookie, Accept', 'X-Content-Type-Options': 'nosniff', 'Server-Timing': `app;dur=${(performance.now() - started).toFixed(1)}`, ...(renewedCookie ? { 'Set-Cookie': renewedCookie } : {}) } });
+    const photoBody = async () => {
+      try { return unpackPhotos(await readBodyBytes(request, 512 * 1024)); }
+      catch (error) { if (error.status) throw error; fail(400, 'INVALID_PHOTO_PACKET', '照片上传不完整，请重试。'); }
+    };
     try {
       if (!auth.configured) fail(503, 'NOT_CONFIGURED', '服务器账号尚未完成配置，请重新部署完整的峰味上传包。');
       const url = new URL(request.url), route = url.pathname.replace(/^.*?\/api\//, ''), method = request.method;
@@ -109,6 +115,21 @@ export function createApi({ database, password }) {
         return reply({ ok: true }, 200, { 'Set-Cookie': sessionCookie(request, '', 0) });
       }
       if (route === 'me' && method === 'GET') return reply({ user });
+      if (route === 'admin/photos' && method === 'GET') {
+        if (user.role !== 'admin') fail(403, 'ADMIN_REQUIRED', '只有管理员可以管理图片空间。');
+        const cursor = url.searchParams.get('cursor') || '';
+        if (cursor && !/^[a-f0-9]{64}$/.test(cursor)) fail(400, 'INVALID_CURSOR', '图片分页位置不正确。');
+        return reply({ userId: user.id, ...await database.photos.inventory(cursor) });
+      }
+      if (route.startsWith('admin/photos/') && method === 'PUT') {
+        action = 'photo.optimize'; target = route.slice(13); operationId = target;
+        if (user.role !== 'admin') fail(403, 'ADMIN_REQUIRED', '只有管理员可以优化已有图片。');
+        const { metadata, photos } = await photoBody();
+        if (metadata?.expectedUserId !== user.id) fail(409, 'ACCOUNT_CHANGED', '账号已切换，请刷新后重试。');
+        if (photos.length !== 1) fail(400, 'INVALID_PHOTO_PACKET', '请每次处理一张图片。');
+        const result = await database.photos.optimize(target, joinPhoto(photos[0]), receipt());
+        await record('success'); return reply({ userId: user.id, result });
+      }
       if (route === 'admin/password-recovery' && method === 'GET') {
         if (user.role !== 'admin') fail(403, 'ADMIN_REQUIRED', '只有管理员可以查看密码找回申请。');
         return reply({ userId: user.id, requests: await recovery.requests() });
@@ -209,11 +230,16 @@ export function createApi({ database, password }) {
       if (route === 'recipes' && method === 'GET') {
         const cursor = url.searchParams.get('cursor') || '';
         if (cursor && !/^[a-f0-9]{64}$/.test(cursor)) fail(400, 'INVALID_CURSOR', '分页位置不正确。');
-        const [result, states] = await Promise.all([database.list(cursor), favorites.states(user.id)]);
+        const [result, states, photoVersion] = await Promise.all([database.list(cursor), favorites.states(user.id), store.get('private/photo-cache-version.json', { type: 'json', consistency: 'strong' })]);
         if (!cursor) { action = 'recipes.sync'; await record('success'); }
-        return reply({ userId: user.id, user, capabilities: { photoReferences: true }, items: result.items.map(event => publicEvent(event, favorites.value(event, user.id, states))), cursor: result.cursor });
+        return reply({ userId: user.id, user, capabilities: { photoReferences: true, binaryPhotos: true, photoVersion: photoVersion?.version || '' }, items: result.items.map(event => publicEvent(event, favorites.value(event, user.id, states))), cursor: result.cursor });
       }
       if (route.startsWith('photo/') && method === 'GET') {
+        if (request.headers.get('accept') === PHOTO_PACKET_TYPE) {
+          const photo = await database.photos.get(route.slice(6));
+          if (!photo) fail(404, 'NOT_FOUND', '照片不存在。');
+          return binaryReply(packPhotos({ userId: user.id }, [photo]), PHOTO_PACKET_TYPE);
+        }
         const photo = await database.photo(route.slice(6));
         if (!photo) fail(404, 'NOT_FOUND', '照片不存在。');
         return reply({ photo });
@@ -221,7 +247,18 @@ export function createApi({ database, password }) {
       if (route === 'photos' && method === 'POST') {
         const data = await body(request, 4096);
         if (!Array.isArray(data?.hashes) || !data.hashes.length || data.hashes.length > 8 || data.hashes.some(key => !/^[a-f0-9]{64}$/.test(key))) fail(400, 'INVALID_PHOTOS', '照片读取请求不正确。');
-        const hashes = [...new Set(data.hashes)], loaded = await Promise.all(hashes.map(key => database.photo(key)));
+        const hashes = [...new Set(data.hashes)];
+        if (request.headers.get('accept') === PHOTO_PACKET_TYPE) {
+          const loaded = await Promise.all(hashes.map(key => database.photos.get(key)));
+          if (loaded.some(photo => !photo)) fail(404, 'PHOTO_NOT_FOUND', '照片不存在，请重新同步菜谱。');
+          const chosen = [], selected = [], pending = []; let size = 0;
+          for (let i = 0; i < loaded.length; i++) {
+            if (size && size + loaded[i].bytes.length > 3 * 1024 * 1024) pending.push(hashes[i]);
+            else { size += loaded[i].bytes.length; chosen.push(loaded[i]); selected.push(hashes[i]); }
+          }
+          return binaryReply(packPhotos({ userId: user.id, hashes: selected, pending }, chosen), PHOTO_PACKET_TYPE);
+        }
+        const loaded = await Promise.all(hashes.map(key => database.photo(key)));
         if (loaded.some(photo => !photo)) fail(404, 'PHOTO_NOT_FOUND', '照片不存在，请重新同步菜谱。');
         const photos = {}, pending = []; let bytes = 0;
         for (let i = 0; i < hashes.length; i++) {
@@ -259,7 +296,15 @@ export function createApi({ database, password }) {
         target = id;
         if (!user.canEdit) fail(403, 'EDIT_PERMISSION_REQUIRED', '当前账号只有查看权限。请在“我的 → 账号授权”说明原因并申请编辑权限。');
         if (!id || id.length > 128 || id.includes('/')) fail(400, 'INVALID_ID', '菜谱编号不正确。');
-        const data = await body(request); mutation(data);
+        let data;
+        if (request.headers.get('content-type') === PHOTO_PACKET_TYPE && method === 'PUT') {
+          const packet = await photoBody(); data = packet.metadata;
+          if (packet.photos.length > 1 || !data?.recipe) fail(400, 'INVALID_PHOTO_PACKET', '菜谱照片数据不正确。');
+          if (packet.photos[0]?.bytes.length > 160 * 1024) fail(413, 'PHOTO_TOO_LARGE', '照片需要压缩到 160 KB 以内。');
+          data.recipe.photo = packet.photos.length ? joinPhoto(packet.photos[0]) : '';
+        } else data = await body(request);
+        mutation(data);
+        if (data.expectedUserId && data.expectedUserId !== user.id) fail(409, 'ACCOUNT_CHANGED', '账号已切换，请重新同步。');
         if (data.photoHash !== undefined && (method !== 'PUT' || typeof data.photoHash !== 'string' || !/^[a-f0-9]{64}$/.test(data.photoHash))) fail(400, 'INVALID_PHOTO', '照片版本不正确，请重新同步。');
         operationId = data.mutationId;
         let recipe = null;
@@ -275,6 +320,10 @@ export function createApi({ database, password }) {
         target = recipe?.title || before?.recipe?.title || id;
         await favorites.preserveLegacy(before);
         const event = await database.commit({ id, recipe, baseRevision: data.baseRevision, mutationId: data.mutationId, auditEntry: receipt(), photoHash: data.photoHash || '' });
+        if (recipe?.photo && request.headers.get('content-type') === PHOTO_PACKET_TYPE) {
+          // A missing optimization hint is harmless and must not negate a saved recipe.
+          await store.setJSON(`private/photo-optimized/${event.photoHash}.json`, { version: 1 }, { cacheControl: 'no-store' }).catch(() => {});
+        }
         // The committed immutable event already contains the durable audit receipt.
         const [states, heads] = await Promise.all([favorites.states(user.id, id), database.headKeys(`recipes/${hash(id)}/`)]);
         return reply({ userId: user.id, item: publicEvent({ ...event, conflictCount: heads[0]?.[2] || 1 }, favorites.value(event, user.id, states)) });

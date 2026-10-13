@@ -10,14 +10,14 @@ export class FileStore {
   async set(key, value, options = {}) {
     const path = this.path(key); await mkdir(dirname(path), { recursive: true });
     const temporary = `${path}.${randomUUID()}.tmp`;
-    await writeFile(temporary, value, { encoding: 'utf8', flag: 'wx', mode: 0o600 });
+    await writeFile(temporary, value instanceof ArrayBuffer ? new Uint8Array(value) : value, { encoding: 'utf8', flag: 'wx', mode: 0o600 });
     try { if (options.onlyIfNew) await link(temporary, path); else await rename(temporary, path); }
     catch (error) { if (error.code === 'EEXIST') error.code = 'PRECONDITION_FAILED'; throw error; }
     finally { await unlink(temporary).catch(error => { if (error.code !== 'ENOENT') throw error; }); }
   }
   setJSON(key, value, options) { return this.set(key, JSON.stringify(value), options); }
   async get(key, options = {}) {
-    try { const value = await readFile(this.path(key), 'utf8'); return options.type === 'json' ? JSON.parse(value) : value; }
+    try { const value = await readFile(this.path(key)); return options.type === 'arrayBuffer' ? value.buffer.slice(value.byteOffset, value.byteOffset + value.byteLength) : options.type === 'json' ? JSON.parse(value.toString('utf8')) : value.toString('utf8'); }
     catch (error) { if (error.code === 'ENOENT') return null; throw error; }
   }
   async list({ prefix = '' } = {}) {
@@ -25,6 +25,7 @@ export class FileStore {
     const entries = await readdir(this.root, { recursive: true, withFileTypes: true });
     return { blobs: entries.filter(item => item.isFile() && !item.name.endsWith('.tmp')).map(item => ({ key: resolve(item.parentPath || item.path, item.name).slice(this.root.length + 1).replaceAll('\\', '/') })).filter(item => item.key.startsWith(prefix)) };
   }
+  async delete(key) { await unlink(this.path(key)).catch(error => { if (error.code !== 'ENOENT') throw error; }); }
   async queryAudit(options = {}) {
     const { cursor = '', limit = 51 } = options;
     const { blobs } = await this.list({ prefix: AUDIT_PREFIX });

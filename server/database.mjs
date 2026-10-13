@@ -1,4 +1,6 @@
 import { createHash, randomUUID } from 'node:crypto';
+import { Photos } from './photos.mjs';
+import { joinPhoto } from '../dist/photo-wire.js';
 
 export const hash = value => createHash('sha256').update(value).digest('hex');
 export class ConflictError extends Error {
@@ -13,7 +15,7 @@ const generationOf = revision => Number(revision?.match(/\/(\d{12})-/)?.[1] || 0
 // on read; truly concurrent writes can form siblings, all of which are retained
 // and exposed via the history UI. Generation + timestamp + ID picks the head.
 export class RecipeDatabase {
-  constructor(store) { this.store = store; }
+  constructor(store) { this.store = store; this.photos = new Photos(store); }
   async headKeys(prefix = 'recipes/') {
     const { blobs } = await this.store.list({ prefix, consistency: 'strong' });
     const heads = new Map();
@@ -43,7 +45,8 @@ export class RecipeDatabase {
   }
   async photo(key) {
     if (!/^[a-f0-9]{64}$/.test(key)) return null;
-    return this.store.get(`photos/${key}.txt`, { consistency: 'strong' });
+    const image = await this.photos.get(key);
+    return image ? joinPhoto(image) : null;
   }
   async commit({ id, recipe = null, baseRevision, mutationId, auditEntry, photoHash: reusedPhotoHash = '' }) {
     if (baseRevision !== null && (typeof baseRevision !== 'string' || !baseRevision.startsWith(`recipes/${hash(id)}/`) || !eventPattern.test(baseRevision))) throw new ConflictError();
@@ -63,7 +66,7 @@ export class RecipeDatabase {
     if (recipe?.photo) {
       photoHash = hash(recipe.photo);
       // Same hash means identical content. Repeated writes are harmless.
-      if (photoHash !== current?.photoHash) await this.store.set(`photos/${photoHash}.txt`, recipe.photo, { cacheControl: 'no-store' });
+      if (photoHash !== current?.photoHash) photoHash = await this.photos.save(recipe.photo);
     }
     const event = {
       id, revision, mutationId, digest, deleted: !recipe, photoHash,

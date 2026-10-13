@@ -31,6 +31,7 @@ export function createAccountStore(source, { url, secretKey, namespace = 'fengwe
         if (isAccountKey(key)) await requireUnmigrated();
         return source.setJSON(key, value, options);
       },
+      async delete(key) { if (!/^photos\/[a-f0-9]{64}\.(txt|bin)$/.test(key)) throw unavailable('ACCOUNT_DATABASE_UNSUPPORTED_KEY'); return source.delete(key); },
     };
   }
   return new SupabaseAccountStore(source, { url, secretKey, namespace, send });
@@ -119,6 +120,7 @@ class SupabaseAccountStore {
     if (!/^private\/audit-pending\/[a-f0-9]{64}\.json$/.test(key)) throw unavailable('ACCOUNT_DATABASE_UNSUPPORTED_KEY');
     if (this.source.delete) await this.source.delete(key);
   }
+  async delete(key) { if (!/^photos\/[a-f0-9]{64}\.(txt|bin)$/.test(key)) throw unavailable('ACCOUNT_DATABASE_UNSUPPORTED_KEY'); return this.source.delete(key); }
   async accountSnapshot(id) {
     if (!/^usr_[a-f0-9]{32}$/.test(id)) throw unavailable('ACCOUNT_DATABASE_UNSUPPORTED_KEY');
     const changes = `private/password-changes/${id}/`, marker = `private/account-migrations/${id}.json`;
