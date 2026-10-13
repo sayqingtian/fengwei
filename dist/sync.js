@@ -3,6 +3,7 @@ import { PHOTO_PACKET_TYPE, packPhotos, unpackPhotos, splitPhoto, joinPhoto } fr
 
 const CACHE_KEY = 'fengwei-server-cache-v2';
 const OLD_CACHE_KEY = 'fengwei-server-cache-v1';
+const LOGOUT_KEY = 'fengwei-pending-logout';
 const CACHE_AGE = 90 * 24 * 3600 * 1000;
 async function parallel(items, work, limit = 6) {
   const result = new Array(items.length); let next = 0;
@@ -15,7 +16,10 @@ export class ApiError extends Error {
   constructor(message, status, code) { super(message); Object.assign(this, { status, code }); }
 }
 export async function createRemoteStore(local) {
+  let pendingLogout = await local?.setting(LOGOUT_KEY).catch(() => null) || null;
+  try { pendingLogout ||= JSON.parse(globalThis.localStorage?.getItem(LOGOUT_KEY) || 'null'); } catch {}
   let snapshot = await local?.setting(CACHE_KEY).catch(() => null) || null;
+  if (pendingLogout) snapshot = null;
   if (!snapshot?.user?.id) snapshot = null;
   let offline = false, authenticated = false, user = snapshot?.user || null;
   let records = snapshot?.recipes || [], revisions = Object.assign(Object.create(null), snapshot?.revisions || {});
@@ -45,9 +49,10 @@ export async function createRemoteStore(local) {
     conflicts = []; photoCache.clear(); user = null; authenticated = false; offline = false;
   }
   async function forget(clearLocal = true) {
+    const previousId = user?.id;
     resetMemory();
     if (clearLocal && local) {
-      try { await local.setSetting(CACHE_KEY, null); await local.setSetting(OLD_CACHE_KEY, null); }
+      try { await local.setSetting(CACHE_KEY, null); await local.setSetting(OLD_CACHE_KEY, null); if (previousId) await local.setSetting(`fengwei-user:${previousId}:pendingWrites`, null); }
       catch { cacheWarning = true; return false; }
     }
     return true;
@@ -57,13 +62,16 @@ export async function createRemoteStore(local) {
     if (user?.id !== nextUser.id) await forget();
     user = nextUser;
   }
-  async function request(path, { method = 'GET', value, binary, receivePhotos = false } = {}) {
+  async function request(path, { method = 'GET', value, binary, receivePhotos = false, retrySafe = false } = {}) {
     const epoch = accountEpoch;
     for (let attempt = 0; attempt < 3; attempt++) {
       let response;
       try {
         response = await fetch(new URL(path, apiBase), { method, credentials: 'same-origin', cache: 'no-store', headers: { ...(receivePhotos ? { Accept: PHOTO_PACKET_TYPE } : {}), ...(binary ? { 'Content-Type': PHOTO_PACKET_TYPE } : value === undefined ? {} : { 'Content-Type': 'application/json' }) }, ...(binary ? { body: binary } : value === undefined ? {} : { body: JSON.stringify(value) }), signal: AbortSignal.timeout(25000) });
-      } catch { throw new ApiError('服务器暂时连不上。缓存仍可查看，修改需要联网后再保存。', 0, 'NETWORK'); }
+      } catch {
+        if (retrySafe && attempt < 2 && epoch === accountEpoch) continue;
+        throw new ApiError(retrySafe ? '尚未确认保存结果，内容已保留。请联网后再次保存，将先核实上次结果。' : '服务器暂时连不上。缓存仍可查看，修改需要联网后再保存。', 0, 'NETWORK');
+      }
       let data;
       try {
         if (response.ok && response.headers.get('content-type') === PHOTO_PACKET_TYPE) {
@@ -73,11 +81,12 @@ export async function createRemoteStore(local) {
             data.photos = Object.fromEntries(data.hashes.map((hash, i) => [hash, joinPhoto(packet.photos[i])]));
           } else data.photo = joinPhoto(packet.photos[0]);
         } else data = await response.json();
-      } catch { throw new ApiError('服务器接口未就绪，请确认上传了包含云函数的完整峰味部署包。', response.status, 'INVALID_RESPONSE'); }
+      } catch { if (retrySafe && attempt < 2 && epoch === accountEpoch) continue; throw new ApiError('未收到完整结果，请重试以确认保存状态。', response.status, 'INVALID_RESPONSE'); }
       if (epoch !== accountEpoch) throw new ApiError('账号已切换，本次请求已取消。', 409, 'ACCOUNT_CHANGED');
       // Retries preserve the exact registration/mutation ID. These errors occur
       // before the platform's request body is available for a server mutation.
       if (response.status === 400 && ['EMPTY_BODY', 'BODY_UNREADABLE'].includes(data.code) && attempt < 2) continue;
+      if (retrySafe && response.status >= 500 && attempt < 2) continue;
       if (!response.ok) {
         if (response.status === 401) {
           await forget();
@@ -145,13 +154,24 @@ export async function createRemoteStore(local) {
   function ensureOnline() {
     if (offline || globalThis.navigator?.onLine === false) throw new ApiError('当前为离线预览，修改还没有保存。联网后请先同步，再保存。', 0, 'OFFLINE');
   }
-  async function writeNow(id, recipe, method = 'PUT', options = {}) {
-    ensureOnline();
-    const valid = recipe ? validateRecipe(recipe) : null;
-    const reused = photoReferences && valid?.photo && hashes[id] && photoCache.get(hashes[id]) === valid.photo ? hashes[id] : '';
-    const value = { ...(valid ? { recipe: { ...valid, photo: reused ? '' : valid.photo } } : {}), ...(reused ? { photoHash: reused } : {}), expectedUserId: user?.id, baseRevision: Object.hasOwn(options, 'baseRevision') ? options.baseRevision : revisions[id] || null, mutationId: createId(), ...(options.operation ? { operation: options.operation } : {}) };
-    const binary = binaryPhotos && valid?.photo && !reused ? packPhotos({ ...value, recipe: { ...value.recipe, photo: '' } }, [splitPhoto(valid.photo)]) : undefined;
-    const data = await request(`recipe/${encodeURIComponent(id)}`, { method, value, binary });
+  async function markLogout(value) {
+    pendingLogout = value;
+    try { if (value) globalThis.localStorage?.setItem(LOGOUT_KEY, JSON.stringify(value)); else globalThis.localStorage?.removeItem(LOGOUT_KEY); } catch { cacheWarning = true; }
+    try { await local?.setSetting(LOGOUT_KEY, value); } catch { cacheWarning = true; }
+  }
+  async function finishLogout() {
+    if (!pendingLogout) return;
+    try { await request('logout', { method: 'POST', value: pendingLogout, retrySafe: true }); }
+    catch (error) { if (error.code !== 'ACCOUNT_CHANGED') throw error; }
+    await markLogout(null);
+  }
+  const uncertain = error => ['NETWORK', 'INVALID_RESPONSE', 'STORAGE_UNAVAILABLE'].includes(error.code) || error.status >= 500;
+  const pendingWrites = new Map();
+  const content = recipe => recipe ? JSON.stringify({ ...recipe, updatedAt: '', favorite: false }) : 'deleted';
+  async function sendWrite(id, pending) {
+    const { value, recipe, method } = pending;
+    const binary = pending.binary ? packPhotos({ ...value, recipe: { ...value.recipe, photo: '' } }, [splitPhoto(recipe.photo)]) : undefined;
+    const data = await request(`recipe/${encodeURIComponent(id)}`, { method, value, binary, retrySafe: true });
     await sameAccount(data);
     const item = data.item;
     revisions[id] = item.revision; hashes[id] = item.photoHash;
@@ -162,6 +182,31 @@ export async function createRemoteStore(local) {
       records.push(await hydrate(item));
     }
     authenticated = true; await persist();
+    return item;
+  }
+  async function writeNow(id, recipe, method = 'PUT', options = {}) {
+    ensureOnline();
+    const valid = recipe ? validateRecipe(recipe) : null;
+    const owner = user?.id, key = `fengwei-user:${owner}:pendingWrites`;
+    let pending = pendingWrites.get(owner);
+    if (!pending) { pending = Object.assign(Object.create(null), await local?.setting(key).catch(() => null) || {}); pendingWrites.set(owner, pending); }
+    const remember = async () => { try { await local?.setSetting(key, structuredClone(pending)); } catch { cacheWarning = true; } };
+    if (pending[id]) {
+      const previous = pending[id];
+      let confirmed;
+      try { confirmed = await sendWrite(id, previous); }
+      catch (error) { if (!uncertain(error)) { delete pending[id]; await remember(); } throw error; }
+      delete pending[id]; await remember();
+      if (previous.method === method && content(previous.recipe) === content(valid)) return;
+      // Only advance this editor's base when its own uncertain write was confirmed.
+      if (!Object.hasOwn(options, 'baseRevision') || options.baseRevision === previous.value.baseRevision) options = { ...options, baseRevision: confirmed.revision };
+    }
+    const reused = photoReferences && valid?.photo && hashes[id] && photoCache.get(hashes[id]) === valid.photo ? hashes[id] : '';
+    const value = { ...(valid ? { recipe: { ...valid, photo: reused ? '' : valid.photo } } : {}), ...(reused ? { photoHash: reused } : {}), expectedUserId: user?.id, baseRevision: Object.hasOwn(options, 'baseRevision') ? options.baseRevision : revisions[id] || null, mutationId: createId(), ...(options.operation ? { operation: options.operation } : {}) };
+    pending[id] = { value, recipe: valid, method, binary: !!(binaryPhotos && valid?.photo && !reused) }; await remember();
+    try { await sendWrite(id, pending[id]); }
+    catch (error) { if (!uncertain(error)) { delete pending[id]; await remember(); } throw error; }
+    delete pending[id]; await remember();
   }
   const write = (...args) => mutate(() => writeNow(...args));
   const setFavorite = (...args) => mutate(() => setFavoriteNow(...args));
@@ -174,6 +219,7 @@ export async function createRemoteStore(local) {
   }
   async function synchronize(job) {
     await mutationTail;
+    if (pendingLogout) { await finishLogout().catch(() => {}); throw new ApiError('已退出，请重新登录。', 401, 'LOGIN_REQUIRED'); }
     const version = dataEpoch;
     try {
       const next = [], newRevisions = Object.create(null), newHashes = Object.create(null), newConflicts = [];
@@ -222,6 +268,8 @@ export async function createRemoteStore(local) {
     get authenticated() { return authenticated; },
     get conflicts() { return conflicts; },
     get cacheWarning() { return cacheWarning; },
+    get pendingLogout() { return !!pendingLogout; },
+    completeLogout: finishLogout,
     current: () => records.slice(),
     revision: id => revisions[id] || null,
     all() {
@@ -266,11 +314,13 @@ export async function createRemoteStore(local) {
       } catch (error) { error.message = `已保存 ${completed} 道，剩余菜谱或收藏尚未导入。${error.message}`; throw error; }
     },
     async login(username, password) {
+      if (pendingLogout) await finishLogout();
       const data = await request('login', { method: 'POST', value: { username, password } });
       accountEpoch++;
       await acceptUser(data.user); offline = false; authenticated = true;
     },
     async register(displayName, password, registrationId) {
+      if (pendingLogout) await finishLogout();
       const data = await request('register', { method: 'POST', value: { displayName, password, registrationId } });
       accountEpoch++;
       await acceptUser(data.user); offline = false; authenticated = true;
@@ -281,9 +331,14 @@ export async function createRemoteStore(local) {
       ensureOnline(); const data = await request('admin/password-recovery/decision', { method: 'POST', value: { ...value, expectedUserId: user?.id } });
       await sameAccount(data); if (data.user) { await acceptUser(data.user); await persist(); } return data.item;
     },
-    async logout() {
-      ensureOnline(); await request('logout', { method: 'POST', value: {} });
-      return forget();
+    async logout(all = false) {
+      if (all) { ensureOnline(); await request('logout', { method: 'POST', value: { all: true, expectedUserId: user?.id }, retrySafe: true }); }
+      const owner = user?.id;
+      await markLogout({ expectedUserId: owner });
+      pendingWrites.delete(owner);
+      const cleared = await forget();
+      if (globalThis.navigator?.onLine !== false) await finishLogout().catch(() => {});
+      return cleared;
     },
     forget,
     async refreshUser() { ensureOnline(); await acceptUser((await request('me')).user); await persist(); return user; },
@@ -308,6 +363,9 @@ export async function createRemoteStore(local) {
       ensureOnline(); const params = new URLSearchParams({ cursor, q: query, result, from, to });
       const data = await request(`audit?${params}`); await sameAccount(data); return data;
     },
+    async retention() { const data = await request('admin/audit-retention'); await sameAccount(data); return data.retention; },
+    async cleanAudit() { ensureOnline(); return request('maintenance/audit', { method: 'POST', value: {} }); },
+    async trash(cursor = '') { ensureOnline(); const data = await request(`trash?cursor=${encodeURIComponent(cursor)}`); await sameAccount(data); return data; },
     async exportAudit(format, { query = '', result = '', from = '', to = '' } = {}) {
       ensureOnline(); const params = new URLSearchParams({ format, q: query, result, from, to });
       const expectedUserId = user?.id;
@@ -326,8 +384,8 @@ export async function createRemoteStore(local) {
       return { blob, filename, count: Number(response.headers.get('x-audit-count') || 0) };
     },
     async activity(action, recipeId) { if (offline || !authenticated) return; await request('activity', { method: 'POST', value: { action, ...(recipeId ? { recipeId } : {}) } }); },
-    async history(id) {
-      ensureOnline(); const data = await request(`history/${encodeURIComponent(id)}`); await sameAccount(data);
+    async history(id, revision) {
+      ensureOnline(); const data = await request(`history/${encodeURIComponent(id)}${revision ? `?revision=${encodeURIComponent(revision)}` : ''}`); await sameAccount(data);
       await loadPhotos(data.items);
       return parallel(data.items, async item => ({ ...item, recipe: await hydrate(item) }));
     },

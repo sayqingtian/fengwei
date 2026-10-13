@@ -161,6 +161,12 @@ npm run dev 默认只监听 localhost:4173。本地文件数据库位于 .data/f
 
 完整备份仅管理员可用，生成 `.fengwei` 加密分卷；恢复步骤见 [MIGRATION.md](MIGRATION.md)。无需新增密钥或数据表，现有数据库需具有 `service_role` 的 DELETE 权限；新安装的 `setup-supabase.sql` 已包含。浏览器角色依旧禁止访问账号表。
 
-`edgeone.json` 与上传 ZIP 均包含 `fengwei-audit-retention` 定时任务，每日 03:15（Asia/Shanghai）触发 `/api/maintenance/audit`。部署后核对定时任务状态，并调用该端点确认返回 200；请求频率受限时返回 429。处理较多旧数据时返回 `complete: false`，下次调用从保存位置继续。
+`edgeone.json` 与上传 ZIP 均包含 `fengwei-audit-retention` 定时任务，每日 03:15（Asia/Shanghai）触发 `/api/maintenance/audit`。部署后核对定时任务状态，并调用该端点确认返回 200；请求频率受限时返回 429。处理较多旧数据时返回 `complete: false`，下次调用从保存位置继续。由于 EdgeOne 定时任务最短间隔一天，仓库另有 GitHub Actions `Clean expired audit logs` 每小时调用 `scripts/clean-audit.mjs`；单次最多连续处理 24 批，按限流间隔等待，出错重试三次后使工作流失败。部署后手动运行该工作流一次，并在管理员日志页确认最近完成时间。无需给工作流配置账号或存储密钥，端点仅执行固定七天保留策略。
 
 新版 service worker 为 v18。部署完成后刷新页面，在“我的 → 菜谱备份”检查完整备份入口，在“操作日志”查看 7 天保留说明。
+
+### 3.1 更新与恢复验收
+
+首次从旧版升级时，关闭所有已打开的网站标签再重新进入。此后新版本安装完成会显示“更新应用”，由用户确认切换；编辑中的草稿先保存在本机，切换后可继续填写。页面底部显示版本号。
+
+建议验收：弱网保存重试只有一个提交版本；“我的 → 回收站”可恢复食材、步骤和照片；退出后原会话失效；断网退出后刷新不会自动进入缓存；“我的 → 本机草稿”可恢复未提交内容；日志清理状态正常。

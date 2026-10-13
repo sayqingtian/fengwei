@@ -82,4 +82,21 @@ export class RecipeDatabase {
     const keys = blobs.map(item => item.key).filter(key => eventPattern.test(key)).sort().reverse().slice(0, 10);
     return Promise.all(keys.map(key => this.read(key)));
   }
+  async trash(cursor = '') {
+    const page = await this.list(cursor);
+    const items = await Promise.all(page.items.filter(item => item.deleted).map(async item => {
+      const { blobs } = await this.store.list({ prefix: `recipes/${hash(item.id)}/`, consistency: 'strong' });
+      const keys = blobs.map(entry => entry.key).filter(key => eventPattern.test(key) && key < item.revision).sort().reverse();
+      for (const key of keys) {
+        const version = await this.read(key);
+        if (version?.recipe && !version.deleted) return { id: item.id, revision: item.revision, deletedAt: item.savedAt, title: version.recipe.title, version: key };
+      }
+      return { id: item.id, revision: item.revision, deletedAt: item.savedAt, title: '未命名菜谱', version: null };
+    }));
+    return { items, cursor: page.cursor };
+  }
+  async version(id, revision) {
+    if (typeof revision !== 'string' || !eventPattern.test(revision) || !revision.startsWith(`recipes/${hash(id)}/`)) return null;
+    return this.read(revision);
+  }
 }

@@ -1,4 +1,4 @@
-import { AuditRetention, auditCutoff } from './audit-retention.mjs';
+import { auditCutoff } from './audit-retention.mjs';
 import { randomUUID } from 'node:crypto';
 import { hash } from './database.mjs';
 
@@ -23,7 +23,6 @@ export class AuditLog {
     if (this.store.queryAudit && !this.store.indexAudit) await this.index(entry);
   }
   async prepare() {
-    await new AuditRetention(this.store).run();
     if (!this.store.queryAudit) return { complete: true };
     const pending = await this.store.list({ prefix: 'private/audit-pending/', consistency: 'strong' });
     const repairing = Date.now(); let repaired = 0;

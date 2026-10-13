@@ -68,3 +68,8 @@ button, a, select, input, textarea, label[for] { touch-action: manipulation; }
   .mobile-nav { gap: 0; }
   .mobile-nav .nav-item { flex: 1; }
 }
+
+/* Recovery and explicit application updates retain the existing touch sizing. */
+.retention-panel{margin:20px 0}.retention-panel p{line-height:1.8}.version-list article{overflow-wrap:anywhere}.version-list h2{font-size:20px;margin:0 0 10px}.update-banner{position:fixed;z-index:75;right:20px;bottom:24px;display:flex;align-items:center;gap:18px;max-width:calc(100vw - 32px);padding:14px 18px;border:1px solid var(--line);border-radius:16px;background:var(--paper);box-shadow:0 8px 35px #1d302922;font-size:14px}.update-banner .button{min-height:44px}#draft-status{line-height:1.7}#update-root:empty{display:none}@media(max-width:760px){.update-banner{left:16px;right:16px;bottom:calc(80px + env(safe-area-inset-bottom));justify-content:space-between}.version-list .management-actions{flex-wrap:wrap}}
+
+.confirm-overlay{z-index:90}

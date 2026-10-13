@@ -1,3 +1,6 @@
+import { createDraftStore } from './drafts.js';
+import { APP_VERSION } from './version.js';
+import { watchUpdates } from './updates.js';
 import { prepareFullBackup, fullBackupPanel } from './full-backup.js';
 import { myPages, roleName } from './my.js';
 import { recoveryPages } from './recovery.js';
@@ -9,6 +12,10 @@ import { CATEGORIES, createId, openStore, validateRecipe, filterRecipes, parseBa
 const $ = (selector, root = document) => root.querySelector(selector);
 const esc = value => String(value ?? '').replace(/[&<>"']/g, char => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[char]);
 let accountDeletion = null;
+let draftStore; try { draftStore = createDraftStore(localStorage); } catch {}
+let draftTimer, draftProblem = '', trashData = null, trashError = '', trashBusy = false;
+let retentionData = null, retentionError = '', retentionBusy = false;
+let updateWorker = null, updateAvailable = false, updateApplying = false, workerRegistration;
 let fullBackupGeneration = 0;
 let fullBackupBusy = false, fullBackupProgress = '', fullBackupError = '', fullBackupPrepared = null;
 let backupBusy = false, backupError = '', preparedBackup = null, backupGeneration = 0;
@@ -59,6 +66,119 @@ const date = value => new Intl.DateTimeFormat('zh-CN', { year: 'numeric', month:
 const errorText = error => error?.name === 'QuotaExceededError' ? '手机存储空间不足，未能保存。请释放空间后重试。' : error?.message || '操作未完成，请重试';
 const findRecipe = id => recipes.find(item => item.id === id);
 
+function readDrafts() {
+  try { return draftStore?.list(db?.user?.id) || []; } catch (error) { draftProblem = errorText(error); return []; }
+}
+function draftNotice() {
+  if (!['recipes', 'favorites'].includes(page) || !db?.user) return '';
+  const count = readDrafts().length;
+  return count ? `<div class="sync-warning">此设备有 ${count} 份未提交草稿。<button class="text-button" data-action="navigate" data-page="drafts">继续编辑</button></div>` : '';
+}
+function draftRecipe() {
+  const form = $('#recipe-form'); if (!editor || !form) return null;
+  const fields = new FormData(form);
+  return { ...editor.recipe, title: fields.get('title'), description: fields.get('description'), category: fields.get('category'), minutes: fields.get('minutes'), servings: fields.get('servings'), notes: fields.get('notes'), ingredients: [...form.querySelectorAll('.ingredient-row')].map(row => ({ name: $('.ingredient-name-input', row).value, amount: $('.ingredient-amount-input', row).value })), steps: [...form.querySelectorAll('.step-input')].map(input => input.value) };
+}
+function saveDraftNow() {
+  clearTimeout(draftTimer);
+  if (!editor?.dirty || editor.saving) return true;
+  const recipe = draftRecipe(); if (!recipe) return true;
+  try {
+    if (!draftStore) throw new Error('浏览器不允许保存本机草稿，请保持页面打开并及时保存到服务器。');
+    draftStore.save(editor.userId, { recipe, baseRevision: editor.baseRevision, isNew: editor.isNew });
+    draftProblem = ''; if ($('#draft-status')) $('#draft-status').textContent = '草稿已保存在此设备，尚未提交到服务器。';
+    return true;
+  } catch (error) {
+    draftProblem = errorText(error);
+    if ($('#draft-status')) $('#draft-status').textContent = `草稿未能保存：${draftProblem}`;
+    return false;
+  }
+}
+function markDraftDirty() {
+  if (!editor) return;
+  editor.dirty = true; clearTimeout(draftTimer);
+  draftTimer = setTimeout(saveDraftNow, 250);
+}
+function removeDraft(owner, id) {
+  clearTimeout(draftTimer);
+  try { draftStore?.remove(owner, id); } catch { toast('服务器已保存，但旧草稿未能清理，请稍后在本机草稿中删除。'); }
+}
+function clearEditorMemory() {
+  clearTimeout(draftTimer); editor = null; detailId = null; cookStep = null;
+  passwordBusy = false; recoveryBusy = false; passwordMutationId = null;
+  confirmResolve?.(false); $('#modal-root').innerHTML = ''; document.body.classList.remove('locked');
+  stopWakeLock().catch(() => {});
+}
+function draftsPage() {
+  const items = readDrafts();
+  return `${my.back()}<h1 class="page-title">本机草稿</h1><p class="page-lead">只有当前账号可以在此设备找回。草稿尚未同步，退出登录会清理；提交后自动移除。</p>${draftProblem ? `<p class="form-error" role="alert">${esc(draftProblem)}</p>` : ''}<section class="panel version-list">${items.map(item => `<article><h2>${esc(item.recipe.title || '还没取名的菜谱')}</h2><p>${esc(new Date(item.savedAt).toLocaleString('zh-CN'))} · ${item.isNew ? '新菜谱' : '未提交修改'}</p><div class="management-actions"><button class="button primary" data-action="resume-draft" data-id="${esc(item.recipe.id)}" ${db?.canEdit ? '' : 'disabled'}>继续编辑</button><button class="button ghost" data-action="discard-draft" data-id="${esc(item.recipe.id)}">删除草稿</button></div></article>`).join('') || '<p class="empty-management">此设备没有未提交的草稿。</p>'}</section>${items.length && !db?.canEdit ? '<p class="permission-note">联网并获得编辑权限后可继续编辑；现有草稿仍保留。</p>' : ''}`;
+}
+function trashPage() {
+  return `${my.back()}<div class="section-head"><h1 class="page-title">回收站</h1><button class="button ghost" data-action="reload-trash" ${trashBusy ? 'disabled' : ''}>刷新回收站</button></div><p class="page-lead">删除的共享菜谱保留在这里。恢复会生成新版本，食材、步骤和照片一并找回。</p>${trashError ? `<p class="form-error" role="alert">${esc(trashError)}</p>` : ''}<section class="panel version-list">${trashData?.items.map(item => `<article><h2>${esc(item.title)}</h2><p>删除于 ${esc(new Date(item.deletedAt).toLocaleString('zh-CN'))}</p><div class="management-actions"><button class="button primary" data-action="restore-trash" data-id="${esc(item.id)}" ${item.version && db?.canEdit ? '' : 'disabled'}>恢复菜谱</button><button class="button ghost" data-action="history" data-id="${esc(item.id)}">查看历史</button></div></article>`).join('') || `<p class="empty-management">${trashBusy ? '正在读取回收站…' : '回收站为空。'}</p>`}${trashData?.cursor ? '<button class="button ghost" data-action="load-more-trash">加载更多</button>' : ''}</section>`;
+}
+async function loadTrash(more = false) {
+  if (trashBusy || !db?.canEdit) return;
+  const owner = db.user.id; trashBusy = true; trashError = ''; render();
+  try {
+    const result = await db.trash(more ? trashData?.cursor || '' : '');
+    if (db.user?.id !== owner) return;
+    trashData = { ...result, items: more ? [...trashData.items, ...result.items] : result.items };
+    // Sparse pages may contain only active recipes; continue until there is something to show.
+    while (!trashData.items.length && trashData.cursor) {
+      const next = await db.trash(trashData.cursor); if (db.user?.id !== owner) return;
+      trashData = next;
+    }
+  } catch (error) { trashError = errorText(error); }
+  finally { trashBusy = false; if (page === 'trash' && db.user?.id === owner) render(); }
+}
+async function restoreTrash(id) {
+  const item = trashData?.items.find(row => row.id === id); if (!item?.version) return;
+  if (!await ask('恢复这道菜？', `“${item.title}”会重新出现在所有账号的共享菜谱本中。`, '确认恢复')) return;
+  const [version] = await db.history(id, item.version);
+  if (!version?.recipe) throw new Error('历史版本暂时不可用，请刷新回收站。');
+  await db.put(version.recipe, { baseRevision: item.revision, operation: 'restore' });
+  await changed(); await loadTrash(); showDetail(id); toast('菜谱和照片已恢复');
+}
+function retentionPanel() {
+  if (db?.user?.role !== 'admin') return '';
+  const data = retentionData, when = value => value ? esc(new Date(value).toLocaleString('zh-CN')) : '尚无记录';
+  return `<section class="panel retention-panel"><h2>过期日志清理</h2><p>${retentionBusy ? '正在处理本批，剩余记录会由自动任务继续清理…' : data?.error ? esc(data.error) : data?.complete ? '上一轮已完成，自动任务会定期检查。' : data?.startedAt ? `处理中：已检查 ${data.processed} 条，完成 ${data.stagesDone}/${data.stagesTotal} 类记录。` : '等待自动任务执行，可点击继续清理。'}</p><p class="small-note">最近检查：${when(data?.lastAttemptAt)}<br>最近完成：${when(data?.lastCompletedAt)}${data?.failedAt ? `<br>最近失败：${when(data.failedAt)}` : ''}</p>${retentionError ? `<p class="form-error" role="alert">${esc(retentionError)}</p>` : ''}<div class="management-actions"><button class="button ghost" data-action="reload-retention" ${retentionBusy ? 'disabled' : ''}>刷新状态</button><button class="button ghost" data-action="clean-audit" ${retentionBusy ? 'disabled' : ''}>继续清理</button></div></section>`;
+}
+async function loadRetention() {
+  if (db?.user?.role !== 'admin') return;
+  const owner = db.user.id;
+  try { const data = await db.retention(); if (db.user?.id === owner) { retentionData = data; retentionError = ''; } }
+  catch (error) { retentionError = errorText(error); }
+  if (page === 'logs' && db.user?.id === owner) render();
+}
+async function cleanAudit() {
+  if (retentionBusy || db?.user?.role !== 'admin') return;
+  retentionBusy = true; retentionError = ''; render();
+  try {
+    const result = await db.cleanAudit();
+    toast(result.complete ? '过期日志已清理完成' : '本批已完成，自动任务会继续处理剩余记录');
+  } catch (error) { retentionError = errorText(error); }
+  finally { retentionBusy = false; const problem = retentionError; await loadRetention(); retentionError = problem; if (page === 'logs') render(); }
+}
+function announceUpdate() {
+  updateAvailable = true;
+  $('#update-root').innerHTML = '<div class="update-banner"><span>新版本已就绪</span><button class="button primary" data-action="apply-update">更新应用</button></div>';
+}
+async function applyUpdate() {
+  if (!updateAvailable || updateApplying) return;
+  if (authBusy || passwordBusy || recoveryBusy || editor?.saving || editor?.processingPhoto || imageBusy || backupBusy || fullBackupBusy || retentionBusy) { toast('请等待当前操作完成后更新。'); return; }
+  if (!saveDraftNow()) { toast('本机草稿未能保存，请先将菜谱保存到服务器后更新。'); return; }
+  const formHasInput = [...document.querySelectorAll('input:not([type="hidden"]), textarea')].some(field => field.value && !field.readOnly);
+  if ((editor?.dirty || formHasInput || preparedBackup || fullBackupPrepared || pendingImport) && !await ask('更新应用？', editor?.dirty ? '菜谱草稿已保存在此设备，更新后可在“我的 → 本机草稿”继续编辑。' : '请先完成正在填写的表单，或下载已生成的备份。更新会重新打开页面。', '现在更新')) return;
+  updateApplying = true;
+  // Avoid a duplicate beforeunload dialog after the user has confirmed and the draft is saved.
+  if (editor) editor.dirty = false;
+  if (updateWorker?.state === 'installed') {
+    updateWorker.postMessage({ type: 'ACTIVATE_UPDATE' });
+    setTimeout(() => { if (updateApplying) { updateApplying = false; toast('更新暂未完成，请重试。草稿仍保留。'); } }, 15000);
+  } else location.reload();
+}
+
 function focusInitialField(field, heading) {
   // Touch users choose when to open the keyboard; keep desktop keyboard navigation.
   const touchLayout = matchMedia('(max-width: 760px), (any-pointer: coarse)').matches;
@@ -71,11 +191,11 @@ function toast(message) {
 }
 
 function nav(mobile = false) {
-  return `<nav class="${mobile ? 'mobile-nav' : 'desktop-nav'}" aria-label="${mobile ? '底部' : '主'}导航">${[['recipes', 'book', '菜谱本'], ['favorites', 'heart', '收藏夹'], ['my', 'people', '我的']].map(([id, mark, name]) => `<button class="nav-item ${(page === id || (id === 'my' && ['backup', 'account', 'permissions', 'logs', 'recovery', 'images'].includes(page))) ? 'active' : ''}" data-action="navigate" data-page="${id}" ${(page === id || (id === 'my' && ['backup', 'account', 'permissions', 'logs', 'recovery', 'images'].includes(page))) ? 'aria-current="page"' : ''}>${icon(mark)}<span>${name}</span></button>`).join('')}</nav>`;
+  return `<nav class="${mobile ? 'mobile-nav' : 'desktop-nav'}" aria-label="${mobile ? '底部' : '主'}导航">${[['recipes', 'book', '菜谱本'], ['favorites', 'heart', '收藏夹'], ['my', 'people', '我的']].map(([id, mark, name]) => `<button class="nav-item ${(page === id || (id === 'my' && ['backup', 'account', 'permissions', 'logs', 'recovery', 'images', 'trash', 'drafts'].includes(page))) ? 'active' : ''}" data-action="navigate" data-page="${id}" ${(page === id || (id === 'my' && ['backup', 'account', 'permissions', 'logs', 'recovery', 'images', 'trash', 'drafts'].includes(page))) ? 'aria-current="page"' : ''}>${icon(mark)}<span>${name}</span></button>`).join('')}</nav>`;
 }
 
 function render() {
-  $('#app').innerHTML = `<a class="skip-link" href="#main">跳到菜谱内容</a><div class="shell"><header class="header"><div class="brand"><div class="brand-icon">${icon('bowl')}</div><div><div class="brand-name">峰味</div><div class="brand-caption">共享菜谱，自己的收藏</div></div></div>${nav()}<span class="private-pill">${icon('people')}共享菜谱 · 独立收藏</span></header>${syncBar()}<main id="main">${page === 'my' ? my.overview(db?.user, recipes.filter(item => item.favorite).length, recoveryData?.requests.filter(item => item.status === 'pending').length || 0) : page === 'backup' ? my.back() + backupPage() : page === 'account' ? my.back() + accountPage() : page === 'permissions' ? my.permissions(db?.user, permissionData, permissionError) : page === 'recovery' ? my.back() + recoveryView.inbox(db?.user, recoveryData, { error: recoveryError, loading: recoveryLoading }) : page === 'images' ? my.back() + imagePage({ user: db?.user, data: imageData, busy: imageBusy, progress: imageProgress, error: imageError, saved: imageSaved }) : page === 'logs' ? my.logs(db?.user, auditData, { query: auditQuery, result: auditResult, from: auditFrom, to: auditTo, error: auditError, loading: auditLoading, exporting: auditExportBusy }) : recipePage()}</main><footer class="footer"><span>一餐一饭，都是生活的小事。</span><span>${icon('leaf')}把好味道分享给彼此</span></footer></div>${nav(true)}`;
+  $('#app').innerHTML = `<a class="skip-link" href="#main">跳到菜谱内容</a><div class="shell"><header class="header"><div class="brand"><div class="brand-icon">${icon('bowl')}</div><div><div class="brand-name">峰味</div><div class="brand-caption">共享菜谱，自己的收藏</div></div></div>${nav()}<span class="private-pill">${icon('people')}共享菜谱 · 独立收藏</span></header>${syncBar()}<main id="main">${draftNotice()}${page === 'drafts' ? draftsPage() : page === 'trash' ? trashPage() : page === 'my' ? my.overview(db?.user, recipes.filter(item => item.favorite).length, recoveryData?.requests.filter(item => item.status === 'pending').length || 0) : page === 'backup' ? my.back() + backupPage() : page === 'account' ? my.back() + accountPage() : page === 'permissions' ? my.permissions(db?.user, permissionData, permissionError) : page === 'recovery' ? my.back() + recoveryView.inbox(db?.user, recoveryData, { error: recoveryError, loading: recoveryLoading }) : page === 'images' ? my.back() + imagePage({ user: db?.user, data: imageData, busy: imageBusy, progress: imageProgress, error: imageError, saved: imageSaved }) : page === 'logs' ? my.logs(db?.user, auditData, { query: auditQuery, result: auditResult, from: auditFrom, to: auditTo, error: auditError, loading: auditLoading, exporting: auditExportBusy, retention: retentionPanel() }) : recipePage()}</main><footer class="footer"><span>一餐一饭，都是生活的小事。</span><span>${icon('leaf')}把好味道分享给彼此 · v${APP_VERSION}</span></footer></div>${nav(true)}`;
   if (['recipes', 'favorites'].includes(page)) renderResults();
 }
 
@@ -126,9 +246,10 @@ async function login(form) {
       await db.register($('#register-name').value.trim(), $('#access-password').value, registrationId);
       page = 'account';
     } else await db.login($('#login-username').value.trim(), $('#access-password').value);
+    if (editor && editor.userId !== db.user?.id) { saveDraftNow(); clearEditorMemory(); }
     resetBackup(); imageStop = true; imageData = null;
     permissionData = null; auditData = null; recoveryData = null; recoveryError = ''; auditQuery = ''; auditResult = ''; auditFrom = ''; auditTo = '';
-    if (['permissions', 'logs', 'recovery', 'images'].includes(page)) page = 'my';
+    if (['permissions', 'logs', 'recovery', 'images', 'trash', 'drafts'].includes(page)) page = 'my';
     channel?.postMessage({ type: 'account-changed', userId: db.user.id });
     await refresh();
     $('#access-password').value = ''; $('#auth-root').innerHTML = '';
@@ -143,7 +264,7 @@ async function login(form) {
 function accountPage() {
   const user = db?.user;
   if (!user) return '<h1 class="page-title">我的账号</h1><p class="page-lead">登录后查看账号信息。</p>';
-  return `<h1 class="page-title">我的账号</h1><p class="page-lead">你好，${esc(user.displayName)}。<br>共享好味道，收藏自己的心头好。</p><section class="panel account-panel"><div class="panel-icon">${icon('people')}</div><h2>${esc(user.displayName)} <span class="role-badge">${roleName(user)}</span></h2><label class="field"><span class="field-label">账号 ID</span><input id="account-id" type="text" value="${esc(user.id)}" readonly spellcheck="false" aria-label="账号 ID"></label><button class="button ghost" data-action="copy-account">${icon('share')}复制账号 ID</button><p class="small-note">可用用户名或这个账号 ID 登录。如果旧用户名存在重名，请使用账号 ID 登录。${user.legacy ? '原账号 wupanfeng 仍可使用，请用当前密码登录。' : ''}</p><div class="account-rules"><p>${user.canEdit ? "当前拥有新增、编辑、删除、导入和恢复菜谱的权限。" : "当前仅有查看权限；编辑前请到账号授权页面申请。"}</p><p>你的 ${recipes.filter(recipe => recipe.favorite).length} 道收藏只属于这个账号，登录同一账号后可跨设备查看。</p></div><div class="management-actions"><button class="button ghost" data-action="navigate" data-page="permissions">账号授权</button><button class="button ghost" data-action="change-password">修改密码</button><button class="button ghost" data-action="logout">退出当前账号</button></div>${user.passwordChangedAt ? `<p class="small-note">最近修改密码：${esc(new Date(user.passwordChangedAt).toLocaleString("zh-CN", { timeZone: "Asia/Shanghai", hour12: false }))}</p>` : ""}</section>`;
+  return `<h1 class="page-title">我的账号</h1><p class="page-lead">你好，${esc(user.displayName)}。<br>共享好味道，收藏自己的心头好。</p><section class="panel account-panel"><div class="panel-icon">${icon('people')}</div><h2>${esc(user.displayName)} <span class="role-badge">${roleName(user)}</span></h2><label class="field"><span class="field-label">账号 ID</span><input id="account-id" type="text" value="${esc(user.id)}" readonly spellcheck="false" aria-label="账号 ID"></label><button class="button ghost" data-action="copy-account">${icon('share')}复制账号 ID</button><p class="small-note">可用用户名或这个账号 ID 登录。如果旧用户名存在重名，请使用账号 ID 登录。${user.legacy ? '原账号 wupanfeng 仍可使用，请用当前密码登录。' : ''}</p><div class="account-rules"><p>${user.canEdit ? "当前拥有新增、编辑、删除、导入和恢复菜谱的权限。" : "当前仅有查看权限；编辑前请到账号授权页面申请。"}</p><p>你的 ${recipes.filter(recipe => recipe.favorite).length} 道收藏只属于这个账号，登录同一账号后可跨设备查看。</p></div><div class="management-actions"><button class="button ghost" data-action="navigate" data-page="permissions">账号授权</button><button class="button ghost" data-action="change-password">修改密码</button><button class="button ghost" data-action="logout">退出当前账号</button><button class="button ghost" data-action="logout-all">退出所有设备</button></div>${user.passwordChangedAt ? `<p class="small-note">最近修改密码：${esc(new Date(user.passwordChangedAt).toLocaleString("zh-CN", { timeZone: "Asia/Shanghai", hour12: false }))}</p>` : ""}</section>`;
 }
 
 function recipePage() {
@@ -205,10 +326,16 @@ async function closeModal() {
   if (passwordBusy || recoveryBusy || editor?.saving || editor?.processingPhoto) return;
   passwordMutationId = null;
   recoveryDecision = null;
-  if (editor?.dirty && !await ask('还没保存这道菜', '关闭后，本次填写的内容会丢失。', '放弃修改')) return;
+  const keptDraft = editor?.dirty;
+  if (editor?.dirty) {
+    if (!saveDraftNow()) { toast('草稿未能保存，请保持页面打开并复制内容。'); return; }
+    if (!await ask('保留草稿并关闭？', '内容已保存在此设备，可在“我的 → 本机草稿”继续编辑。退出登录会清理本机草稿。', '保留并关闭')) return;
+  }
+  clearTimeout(draftTimer);
   await stopWakeLock();
   editor = null; detailId = null; cookStep = null; permissionDecision = null;
   $('#modal-root').innerHTML = ''; $('#app').inert = $('#auth-root').hasChildNodes(); document.body.classList.remove('locked');
+  if (keptDraft) render();
   (restoreFocus?.isConnected ? restoreFocus : $('[data-action="new"]'))?.focus({ preventScroll: true });
 }
 
@@ -231,12 +358,13 @@ function stepRow(text = '', index = 0) {
   return `<div class="step-row"><span class="step-number">${index + 1}</span><textarea class="step-input" rows="3" maxlength="12000" aria-label="步骤 ${index + 1}" placeholder="记下这一步怎么做…">${esc(text)}</textarea><button type="button" class="remove-row" data-action="remove-step" aria-label="删除步骤 ${index + 1}">${icon('close')}</button></div>`;
 }
 
-function showEditor(id) {
+function showEditor(id, draft = null) {
   if (!db?.canEdit) { toast("当前只有查看权限，请先申请编辑授权。"); return; }
-  const recipe = id ? findRecipe(id) : blankRecipe(); if (!recipe) return;
+  draft ||= id ? readDrafts().find(item => item.recipe.id === id) : null;
+  const recipe = draft?.recipe || (id ? findRecipe(id) : blankRecipe()); if (!recipe) return;
   detailId = null; cookStep = null;
-  editor = { recipe: structuredClone(recipe), baseRevision: db.revision(recipe.id), isNew: !id, dirty: false, saving: false, processingPhoto: false };
-  showModal(`<div class="modal-header"><div><h2 id="modal-title" tabindex="-1">${id ? '再添一点好味道' : '记一道新菜'}</h2><div class="header-label">先记下菜名，其他的可以慢慢补全。</div></div><button type="button" class="icon-button" data-action="close" aria-label="关闭编辑">${icon('close')}</button></div><div class="modal-scroll"><form id="recipe-form"><p id="form-error" class="form-error" role="alert" hidden></p><div class="photo-uploader" id="photo-uploader">${photoUploader()}</div><section class="form-section"><label class="field"><span class="field-label">菜名 <span aria-hidden="true">*</span></span><input id="recipe-title" name="title" required maxlength="80" placeholder="这道菜叫什么名字？" value="${esc(recipe.title)}"></label><label class="field"><span class="field-label">一句话介绍</span><input name="description" maxlength="300" placeholder="比如：十分钟就能做好的下饭菜" value="${esc(recipe.description)}"></label><div class="field-row"><label class="field"><span class="field-label">分类</span><input name="category" list="category-list" maxlength="30" placeholder="可自定义" value="${esc(recipe.category)}"><datalist id="category-list">${CATEGORIES.map(item => `<option value="${item}">`).join('')}</datalist></label><label class="field"><span class="field-label">用时 / 分钟</span><input name="minutes" type="number" inputmode="numeric" min="0" max="1440" step="1" placeholder="可不填" value="${recipe.minutes || ''}"></label><label class="field"><span class="field-label">份量 / 人份</span><input name="servings" type="number" inputmode="numeric" required min="1" max="100" step="1" value="${recipe.servings}"></label></div></section><section class="form-section"><div class="form-section-title"><h3>准备哪些食材</h3><span>食材与用量，分开记更清楚</span></div><div id="ingredient-rows">${(recipe.ingredients.length ? recipe.ingredients : [{ name: '', amount: '' }]).map(ingredientRow).join('')}</div><button type="button" class="add-row" data-action="add-ingredient">${icon('plus')}再加一种食材</button></section><section class="form-section"><div class="form-section-title"><h3>一步一步，怎么做</h3><span>一道菜，一点点写下来</span></div><div id="step-rows">${(recipe.steps.length ? recipe.steps : ['']).map(stepRow).join('')}</div><button type="button" class="add-row" data-action="add-step">${icon('plus')}再加一个步骤</button></section><section class="form-section"><label class="field"><span class="field-label">我的小心得</span><textarea name="notes" maxlength="12000" rows="3" placeholder="火候、调味、下次想改的地方…">${esc(recipe.notes)}</textarea></label></section></form></div><div class="modal-footer">${id ? `<button class="button danger" data-action="delete" data-id="${esc(id)}">${icon('trash')}删除</button>` : '<button class="button ghost" data-action="close">取消</button>'}<button id="save-recipe" class="button primary" type="submit" form="recipe-form">${icon('check')}保存这道菜</button></div>`);
+  editor = { recipe: structuredClone(recipe), baseRevision: draft ? draft.baseRevision : db.revision(recipe.id), isNew: draft ? draft.isNew : !id, userId: db.user.id, dirty: !!draft, saving: false, processingPhoto: false };
+  showModal(`<div class="modal-header"><div><h2 id="modal-title" tabindex="-1">${id ? '再添一点好味道' : '记一道新菜'}</h2><div class="header-label">先记下菜名，其他的可以慢慢补全。</div></div><button type="button" class="icon-button" data-action="close" aria-label="关闭编辑">${icon('close')}</button></div><div class="modal-scroll"><form id="recipe-form"><p id="form-error" class="form-error" role="alert" hidden></p><p id="draft-status" class="small-note" role="status">${draft ? "已恢复本机草稿，保存后才会同步到服务器。" : "填写内容会自动保存为本机草稿。"}</p><div class="photo-uploader" id="photo-uploader">${photoUploader()}</div><section class="form-section"><label class="field"><span class="field-label">菜名 <span aria-hidden="true">*</span></span><input id="recipe-title" name="title" required maxlength="80" placeholder="这道菜叫什么名字？" value="${esc(recipe.title)}"></label><label class="field"><span class="field-label">一句话介绍</span><input name="description" maxlength="300" placeholder="比如：十分钟就能做好的下饭菜" value="${esc(recipe.description)}"></label><div class="field-row"><label class="field"><span class="field-label">分类</span><input name="category" list="category-list" maxlength="30" placeholder="可自定义" value="${esc(recipe.category)}"><datalist id="category-list">${CATEGORIES.map(item => `<option value="${item}">`).join('')}</datalist></label><label class="field"><span class="field-label">用时 / 分钟</span><input name="minutes" type="number" inputmode="numeric" min="0" max="1440" step="1" placeholder="可不填" value="${recipe.minutes || ''}"></label><label class="field"><span class="field-label">份量 / 人份</span><input name="servings" type="number" inputmode="numeric" required min="1" max="100" step="1" value="${recipe.servings}"></label></div></section><section class="form-section"><div class="form-section-title"><h3>准备哪些食材</h3><span>食材与用量，分开记更清楚</span></div><div id="ingredient-rows">${(recipe.ingredients.length ? recipe.ingredients : [{ name: '', amount: '' }]).map(ingredientRow).join('')}</div><button type="button" class="add-row" data-action="add-ingredient">${icon('plus')}再加一种食材</button></section><section class="form-section"><div class="form-section-title"><h3>一步一步，怎么做</h3><span>一道菜，一点点写下来</span></div><div id="step-rows">${(recipe.steps.length ? recipe.steps : ['']).map(stepRow).join('')}</div><button type="button" class="add-row" data-action="add-step">${icon('plus')}再加一个步骤</button></section><section class="form-section"><label class="field"><span class="field-label">我的小心得</span><textarea name="notes" maxlength="12000" rows="3" placeholder="火候、调味、下次想改的地方…">${esc(recipe.notes)}</textarea></label></section></form></div><div class="modal-footer">${id ? `<button class="button danger" data-action="delete" data-id="${esc(id)}">${icon('trash')}删除</button>` : '<button class="button ghost" data-action="close">取消</button>'}<button id="save-recipe" class="button primary" type="submit" form="recipe-form">${icon('check')}保存这道菜</button></div>`);
 }
 
 function photoUploader() {
@@ -268,8 +396,10 @@ async function saveRecipe() {
     const ingredients = [...document.querySelectorAll('.ingredient-row')].map(row => ({ name: $('.ingredient-name-input', row).value.trim(), amount: $('.ingredient-amount-input', row).value.trim() }));
     if (ingredients.some(item => !item.name && item.amount)) throw new Error('请为已填写用量的食材补上名称');
     const recipe = validateRecipe({ ...editor.recipe, title: fields.get('title').trim(), description: fields.get('description').trim(), category: fields.get('category').trim() || '其他', minutes: Number(fields.get('minutes') || 0), servings: Number(fields.get('servings')), ingredients: ingredients.filter(item => item.name), steps: [...document.querySelectorAll('.step-input')].map(input => input.value.trim()).filter(Boolean), notes: fields.get('notes').trim(), updatedAt: new Date().toISOString() });
+    saveDraftNow();
     editor.saving = true; form.inert = true; button.disabled = true; button.textContent = '正在保存…';
     await db.put(recipe, { baseRevision: editor.baseRevision });
+    removeDraft(editor.userId, recipe.id);
     editor.dirty = false; editor.saving = false;
     await changed(); await closeModal(); showDetail(recipe.id); toast('已保存到服务器');
     navigator.storage?.persist?.().catch(() => {});
@@ -292,10 +422,11 @@ async function favorite(id) {
 async function deleteRecipe(id) {
   if (editor?.saving || editor?.processingPhoto) return;
   const recipe = findRecipe(id); if (!recipe) return;
-  if (!await ask('删除这道菜？', `“${recipe.title}”会从共享菜谱本移除，所有账号都会看不到它。已有备份文件和历史版本保留。`, '删除菜谱', true)) return;
+  if (!await ask('删除这道菜？', `“${recipe.title}”会从共享菜谱本移除，所有账号都会看不到它。可在“我的 → 回收站”恢复，已有备份和历史版本保留。`, '删除菜谱', true)) return;
   await db.remove(id);
+  removeDraft(db.user.id, id);
   if (editor) editor.dirty = false;
-  await changed(); await closeModal(); toast('菜谱已删除');
+  await changed(); await closeModal(); toast('已移入回收站，可在“我的”中恢复');
 }
 
 async function startCook(id) {
@@ -649,12 +780,19 @@ async function handleAction(button) {
       catch { $('#account-id').focus(); $('#account-id').select(); toast('账号 ID 已选中，请长按或使用复制菜单。'); }
       break;
     case 'sync': button.disabled = true; try { await refresh(); toast(db.readOnly ? '服务器暂不可达，正在查看缓存。' : '已读取服务器上的最新菜谱'); } finally { if (button.isConnected) button.disabled = false; } break;
-    case 'logout': {
-      resetBackup(); imageStop = true; imageData = null;
-      permissionData = null; auditData = null; recoveryData = null; recoveryError = ''; auditQuery = ''; auditResult = ''; auditFrom = ''; auditTo = '';
-      const cleared = await db.logout(); recipes = []; pendingImport = null; historyItems = []; page = 'recipes'; legacyCount = 0;
+    case 'logout':
+    case 'logout-all': {
+      const all = action === 'logout-all';
+      if (all && !await ask('退出所有设备？', '当前设备也会退出，所有设备需要重新登录。', '全部退出')) break;
+      if (readDrafts().length && !await ask('退出并清理本机草稿？', '此设备未提交的草稿和离线缓存将被清除。需要保留的内容请先保存到服务器。', '退出并清理', true)) break;
+      const owner = db.user?.id;
+      const cleared = await db.logout(all);
+      let draftsCleared = true; try { draftStore?.clear(owner); } catch { draftsCleared = false; }
+      clearEditorMemory(); resetBackup(); imageStop = true; imageData = null;
+      permissionData = null; auditData = null; recoveryData = null; trashData = null; retentionData = null; recoveryError = ''; auditQuery = ''; auditResult = ''; auditFrom = ''; auditTo = '';
+      recipes = []; pendingImport = null; historyItems = []; page = 'recipes'; legacyCount = 0;
       channel?.postMessage({ type: 'account-changed', userId: null }); render();
-      showLogin(cleared ? '已退出登录，此设备的服务器缓存已清除。' : '已退出登录。手机缓存未能清理，可在浏览器设置中清除此网站数据。'); break;
+      showLogin(!cleared || !draftsCleared ? '已退出登录。部分本机数据未能清理，可在浏览器设置中清除此网站数据。' : db.pendingLogout ? '已退出并清除此设备数据。联网后将自动注销服务器会话。' : all ? '已退出所有设备，请重新登录。' : '已退出登录，此设备缓存和草稿已清除。'); break;
     }
     case 'history': await showHistory(id); break;
     case 'restore-version': await restoreVersion(Number(button.dataset.index)); break;
@@ -663,8 +801,9 @@ async function handleAction(button) {
       if ($('#modal-root').hasChildNodes()) { await closeModal(); if ($('#modal-root').hasChildNodes()) break; }
       page = button.dataset.page; query = ''; category = '全部'; pendingImport = null; render(); window.scrollTo(0, 0);
       if (page === 'permissions') await loadPermissions();
-      if (page === 'logs') await loadLogs();
+      if (page === 'logs') { await loadLogs(); await loadRetention(); }
       if (page === 'images') await loadImages();
+      if (page === 'trash') await loadTrash();
       if (page === 'recovery' || (page === 'my' && db.user?.role === 'admin')) await loadRecoveries();
       break;
     case 'reload-images': await loadImages(); break;
@@ -675,6 +814,14 @@ async function handleAction(button) {
     case 'account-delete': showAccountDeletion(button.dataset); break;
     case 'load-more-logs': await loadLogs(true); break;
     case 'new': showEditor(); break;
+    case 'resume-draft': { const draft = readDrafts().find(item => item.recipe.id === id); if (draft) showEditor(draft.isNew ? undefined : id, draft); break; }
+    case 'discard-draft': if (await ask('删除这份草稿？', '只删除此设备未提交的内容，服务器菜谱保持原样。', '删除草稿', true)) { removeDraft(db.user.id, id); render(); } break;
+    case 'reload-trash': await loadTrash(); break;
+    case 'load-more-trash': await loadTrash(true); break;
+    case 'restore-trash': button.disabled = true; try { await restoreTrash(id); } finally { button.disabled = false; } break;
+    case 'reload-retention': await loadRetention(); break;
+    case 'clean-audit': await cleanAudit(); break;
+    case 'apply-update': await applyUpdate(); break;
     case 'detail': showDetail(id); db.activity('recipe.view', id).catch(() => {}); break;
     case 'edit': showEditor(id); break;
     case 'close': await closeModal(); break;
@@ -682,11 +829,11 @@ async function handleAction(button) {
     case 'category': category = button.dataset.category; render(); break;
     case 'reset-filters': page = 'recipes'; query = ''; category = '全部'; render(); break;
     case 'sample': button.disabled = true; try { await addSample(); } finally { button.disabled = false; } break;
-    case 'add-ingredient': if ($('#ingredient-rows').children.length >= 100) { toast('最多记录 100 种食材'); break; } $('#ingredient-rows').insertAdjacentHTML('beforeend', ingredientRow()); editor.dirty = true; renumberRows(); $('#ingredient-rows').lastElementChild.querySelector('input').focus(); break;
-    case 'add-step': if ($('#step-rows').children.length >= 100) { toast('最多记录 100 个步骤'); break; } $('#step-rows').insertAdjacentHTML('beforeend', stepRow()); editor.dirty = true; renumberRows(); $('#step-rows').lastElementChild.querySelector('textarea').focus(); break;
-    case 'remove-ingredient': button.closest('.ingredient-row').remove(); editor.dirty = true; renumberRows(); break;
-    case 'remove-step': button.closest('.step-row').remove(); editor.dirty = true; renumberRows(); break;
-    case 'remove-photo': if (editor.processingPhoto) break; editor.recipe.photo = ''; editor.photoInfo = ''; editor.dirty = true; $('#photo-uploader').innerHTML = photoUploader(); break;
+    case 'add-ingredient': if ($('#ingredient-rows').children.length >= 100) { toast('最多记录 100 种食材'); break; } $('#ingredient-rows').insertAdjacentHTML('beforeend', ingredientRow()); markDraftDirty(); renumberRows(); $('#ingredient-rows').lastElementChild.querySelector('input').focus(); break;
+    case 'add-step': if ($('#step-rows').children.length >= 100) { toast('最多记录 100 个步骤'); break; } $('#step-rows').insertAdjacentHTML('beforeend', stepRow()); markDraftDirty(); renumberRows(); $('#step-rows').lastElementChild.querySelector('textarea').focus(); break;
+    case 'remove-ingredient': button.closest('.ingredient-row').remove(); markDraftDirty(); renumberRows(); break;
+    case 'remove-step': button.closest('.step-row').remove(); markDraftDirty(); renumberRows(); break;
+    case 'remove-photo': if (editor.processingPhoto) break; editor.recipe.photo = ''; editor.photoInfo = ''; markDraftDirty(); $('#photo-uploader').innerHTML = photoUploader(); break;
     case 'delete': await deleteRecipe(id); break;
     case 'cook': await startCook(id); db.activity('recipe.cook', id).catch(() => {}); break;
     case 'cook-back': if (cookStep > 0) { cookStep--; renderCook(); } break;
@@ -711,7 +858,7 @@ document.addEventListener('input', event => {
   if (event.target.id === 'search') { query = event.target.value; if (!event.isComposing) renderResults(); }
   else if (event.target.closest('#login-form, #register-form')) { $('#login-error').hidden = true; if (event.target.closest('#register-form')) registrationId = createId(); }
   else if (event.target.closest('#password-change-form')) { passwordMutationId = createId(); $('#password-change-error').hidden = true; }
-  else if (editor && event.target.closest('#recipe-form')) editor.dirty = true;
+  else if (editor && event.target.closest('#recipe-form')) markDraftDirty();
 });
 document.addEventListener('compositionend', event => {
   if (event.target.id === 'search') { query = event.target.value; renderResults(); }
@@ -726,7 +873,7 @@ document.addEventListener('change', async event => {
       try {
         const result = await compressPhoto(event.target.files[0], toast);
         const photo = result.photo; currentEditor.photoInfo = `${result.type.split('/')[1].toUpperCase()} · ${result.width} × ${result.height} · ${photoSize(result.bytes)}`;
-        if (editor === currentEditor) { editor.recipe.photo = photo; editor.dirty = true; $('#photo-uploader').innerHTML = photoUploader(); toast(`照片已优化：${photoSize(result.originalBytes)} → ${photoSize(result.bytes)}`); }
+        if (editor === currentEditor) { editor.recipe.photo = photo; markDraftDirty(); $('#photo-uploader').innerHTML = photoUploader(); toast(`照片已优化：${photoSize(result.originalBytes)} → ${photoSize(result.bytes)}`); }
       } finally { currentEditor.processingPhoto = false; if (editor === currentEditor) $('#save-recipe').disabled = false; }
     }
   } catch (error) { toast(errorText(error)); }
@@ -751,18 +898,19 @@ document.addEventListener('keydown', event => {
   if (event.key === 'Enter' && event.target.id === 'search' && !event.isComposing && event.keyCode !== 229) {
     event.preventDefault(); event.target.blur(); return;
   }
-  if (event.key === 'Escape' && $('#auth-root').hasChildNodes()) return;
+  if (event.key === 'Escape' && $('#auth-root').hasChildNodes() && !confirmResolve) return;
   if (event.key === 'Escape') { if (confirmResolve) confirmResolve(false); else if ($('#modal-root').hasChildNodes()) closeModal(); }
   if (event.key !== 'Tab') return;
-  const root = $('#auth-root').hasChildNodes() ? $('#auth-root') : $('#confirm-root').hasChildNodes() ? $('#confirm-root') : $('#modal-root').hasChildNodes() ? $('#modal-root') : null;
+  const root = $('#confirm-root').hasChildNodes() ? $('#confirm-root') : $('#auth-root').hasChildNodes() ? $('#auth-root') : $('#modal-root').hasChildNodes() ? $('#modal-root') : null;
   if (!root) return;
   const controls = [...root.querySelectorAll('button:not(:disabled), input:not([hidden]), textarea, select, [tabindex="0"]')].filter(element => element.getClientRects().length);
   const first = controls[0], last = controls.at(-1);
   if (event.shiftKey && (document.activeElement === first || !controls.includes(document.activeElement))) { event.preventDefault(); last?.focus(); }
   else if (!event.shiftKey && document.activeElement === last) { event.preventDefault(); first?.focus(); }
 });
-window.addEventListener('beforeunload', event => { if (editor?.dirty || imageBusy || backupBusy || fullBackupBusy) { event.preventDefault(); event.returnValue = ''; } });
-window.addEventListener('online', () => { toast('网络已连接，请同步服务器菜谱后再修改。'); if (db && !editor && !$('#modal-root').hasChildNodes() && !$('#auth-root').hasChildNodes()) refresh().catch(error => toast(errorText(error))); });
+window.addEventListener('pagehide', saveDraftNow);
+window.addEventListener('beforeunload', event => { saveDraftNow(); if (editor?.dirty || imageBusy || backupBusy || fullBackupBusy) { event.preventDefault(); event.returnValue = ''; } });
+window.addEventListener('online', () => { db?.completeLogout().catch(() => {}); toast('网络已连接，请同步服务器菜谱后再修改。'); if (db && !editor && !$('#modal-root').hasChildNodes() && !$('#auth-root').hasChildNodes()) refresh().catch(error => toast(errorText(error))); });
 window.addEventListener('offline', () => toast('已离线，已同步的菜谱仍可查看；修改需要联网保存。'));
 window.addEventListener('fengwei:permissions-changed', () => { permissionData = null; render(); });
 window.addEventListener('fengwei:login-required', async () => {
@@ -789,6 +937,8 @@ channel?.addEventListener('message', async event => {
       if (passwordForm) { passwordForm.reset(); passwordBusy = false; await closeModal(); }
       resetBackup(); imageStop = true; imageData = null;
       permissionData = null; auditData = null; recoveryData = null; recoveryError = '';
+      if (event.data.userId) saveDraftNow(); else { try { draftStore?.clear(db.user?.id); } catch {} }
+      clearEditorMemory(); trashData = null; retentionData = null;
       await db.forget(false); recipes = []; pendingImport = null; historyItems = []; render();
       if (!event.data.userId) { showLogin('账号已在其他页面退出，请重新登录。'); return; }
       await refresh();
@@ -801,6 +951,8 @@ channel?.addEventListener('message', async event => {
   } catch (error) { if (error.status !== 401) toast(errorText(error)); }
 });
 document.addEventListener('visibilitychange', async () => {
+  if (document.visibilityState === 'hidden') saveDraftNow();
+  if (document.visibilityState === 'visible') workerRegistration?.update().catch(() => {});
   if (document.visibilityState === 'visible' && db?.authenticated && navigator.onLine !== false && !db.readOnly) {
     try { const role = db.user?.role; await db.refreshUser(); if (role !== db.user?.role) { render(); if (page === 'permissions') await loadPermissions(); toast(`账号权限已更新：${roleName(db.user)}`); } } catch {}
   }
@@ -833,7 +985,11 @@ async function init() {
         offlineReady = true;
         if (page === 'backup') render();
       }
-      await navigator.serviceWorker.register('./sw.js', { scope: './' });
+      workerRegistration = await navigator.serviceWorker.register('./sw.js', { scope: './', updateViaCache: 'none' });
+      watchUpdates(workerRegistration, navigator.serviceWorker, { ready: worker => { updateWorker = worker; announceUpdate(); }, changed: () => {
+        if (updateApplying) location.reload(); else announceUpdate();
+      } });
+      workerRegistration.update().catch(() => {});
       await navigator.serviceWorker.ready;
       offlineReady = true;
       if (page === 'backup') render();

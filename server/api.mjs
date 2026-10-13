@@ -70,7 +70,6 @@ export function createApi({ database, password }) {
       if (route === 'maintenance/audit' && method === 'POST') {
         // Fixed server policy only: no caller-controlled keys, dates or scope.
         await limits.consume('audit-maintenance', 'global', 1, 60000, 'TRY_LATER', '清理正在进行，请稍后重试。');
-        await store.checkAuditDelete?.();
         const result = await new AuditRetention(store).run({ maxRecords: 2000, budgetMs: 15000 });
         return reply({ ok: true, complete: !!result.completedAt });
       }
@@ -117,15 +116,25 @@ export function createApi({ database, password }) {
         return reply({ ok: true, message: RECOVERY_MESSAGE });
       }
       const session = await auth.verify(request);
-      if (!session) fail(401, 'LOGIN_REQUIRED', '请先输入账号和密码，打开你的私人菜谱本。');
-      if (session.renew) renewedCookie = sessionCookie(request, await auth.issue(session.account));
-      const user = session.user;
-      actor = user;
       if (route === 'logout' && method === 'POST') {
-        action = 'account.logout'; await record('success');
+        const data = await body(request, 4096);
+        if (!session && data.all === true && !(await auth.verify(request, Date.now(), { allowRevoked: true }))?.allLogout) fail(401, 'LOGIN_REQUIRED', '请重新登录后再退出所有设备。');
+        if (session && data.expectedUserId && data.expectedUserId !== session.user.id) fail(409, 'ACCOUNT_CHANGED', '账号已切换，请重新登录。');
+        if (session) {
+          actor = session.user; action = 'account.logout'; target = data.all === true ? '退出所有设备' : '退出当前设备';
+          await auth.revoke(session, data.all === true); await record('success');
+        }
         return reply({ ok: true }, 200, { 'Set-Cookie': sessionCookie(request, '', 0) });
       }
+      if (!session) fail(401, 'LOGIN_REQUIRED', '请先输入账号和密码，打开你的私人菜谱本。');
+      if (session.renew) renewedCookie = sessionCookie(request, await auth.issue(session.account, undefined, session));
+      const user = session.user;
+      actor = user;
       if (route === 'me' && method === 'GET') return reply({ user });
+      if (route === 'admin/audit-retention' && method === 'GET') {
+        if (user.role !== 'admin') fail(403, 'ADMIN_REQUIRED', '只有管理员可以查看清理状态。');
+        return reply({ userId: user.id, retention: await new AuditRetention(store).status() });
+      }
       if (route.startsWith('admin/backup/') && method === 'POST') {
         if (user.role !== 'admin') fail(403, 'ADMIN_REQUIRED', '只有 wupanfeng 管理员可以生成完整迁移备份。');
         const data = await body(request, 16384);
@@ -259,6 +268,12 @@ export function createApi({ database, password }) {
         if (!cursor) { action = 'recipes.sync'; await record('success'); }
         return reply({ userId: user.id, user, capabilities: { photoReferences: true, binaryPhotos: true, photoVersion: photoVersion?.version || '' }, items: result.items.map(event => publicEvent(event, favorites.value(event, user.id, states))), cursor: result.cursor });
       }
+      if (route === 'trash' && method === 'GET') {
+        if (!user.canEdit) fail(403, 'EDIT_PERMISSION_REQUIRED', '回收站需要编辑权限。');
+        const cursor = url.searchParams.get('cursor') || '';
+        if (cursor && !/^[a-f0-9]{64}$/.test(cursor)) fail(400, 'INVALID_CURSOR', '分页位置不正确。');
+        return reply({ userId: user.id, ...await database.trash(cursor) });
+      }
       if (route.startsWith('photo/') && method === 'GET') {
         if (request.headers.get('accept') === PHOTO_PACKET_TYPE) {
           const photo = await database.photos.get(route.slice(6));
@@ -296,7 +311,8 @@ export function createApi({ database, password }) {
       if (route.startsWith('history/') && method === 'GET') {
         const id = decodeURIComponent(route.slice(8));
         if (!id || id.length > 128 || id.includes('/')) fail(400, 'INVALID_ID', '菜谱编号不正确。');
-        const [states, history] = await Promise.all([favorites.states(user.id), database.history(id)]);
+        const revision = url.searchParams.get('revision');
+        const [states, history] = await Promise.all([favorites.states(user.id), revision ? database.version(id, revision).then(item => item ? [item] : []) : database.history(id)]);
         action = 'recipe.history'; target = history[0]?.recipe?.title || id; await record('success');
         return reply({ userId: user.id, items: history.map(event => publicEvent(event, favorites.value(event, user.id, states))) });
       }
