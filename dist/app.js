@@ -59,6 +59,12 @@ const date = value => new Intl.DateTimeFormat('zh-CN', { year: 'numeric', month:
 const errorText = error => error?.name === 'QuotaExceededError' ? '手机存储空间不足，未能保存。请释放空间后重试。' : error?.message || '操作未完成，请重试';
 const findRecipe = id => recipes.find(item => item.id === id);
 
+function focusInitialField(field, heading) {
+  // Touch users choose when to open the keyboard; keep desktop keyboard navigation.
+  const touchLayout = matchMedia('(max-width: 760px), (any-pointer: coarse)').matches;
+  (touchLayout ? heading : field || heading)?.focus({ preventScroll: true });
+}
+
 function toast(message) {
   const element = $('#toast'); element.textContent = message; element.classList.add('visible');
   clearTimeout(toastTimer); toastTimer = setTimeout(() => element.classList.remove('visible'), 3600);
@@ -82,14 +88,16 @@ function showLogin(message = '登录查看所有共享菜谱，收藏夹只记�
   const register = mode === 'register';
   if (register) registrationId = createId();
   $('#auth-root').innerHTML = `<div class="auth-overlay"><section class="auth-panel" role="dialog" aria-modal="true" aria-labelledby="auth-title"><span class="boot-mark">峰味</span><h1 id="auth-title">${register ? '注册自己的账号' : '打开共享菜谱本'}</h1><p>${esc(message)}</p><div class="auth-tabs" role="group" aria-label="登录或注册"><button class="${register ? '' : 'active'}" data-action="auth-login" aria-pressed="${!register}">登录账号</button><button class="${register ? 'active' : ''}" data-action="auth-register" aria-pressed="${register}">注册账号</button></div><form id="${register ? 'register-form' : 'login-form'}">${register ? '<label class="field"><span class="field-label">用户名</span><input id="register-name" name="displayName" type="text" autocomplete="username" required maxlength="30" placeholder="设置唯一用户名"></label>' : `<label class="field"><span class="field-label">账号</span><input id="login-username" name="username" type="text" autocomplete="username" required maxlength="64" placeholder="用户名或账号 ID" autocapitalize="none" spellcheck="false"></label>`}<label class="field"><span class="field-label">密码</span><input id="access-password" name="password" type="password" autocomplete="${register ? 'new-password' : 'current-password'}" required ${register ? 'minlength="8" maxlength="128" placeholder="设置至少 8 位密码"' : 'maxlength="256" placeholder="输入密码"'}></label>${register ? '<label class="field"><span class="field-label">确认密码</span><input id="register-confirm" type="password" autocomplete="new-password" required minlength="8" maxlength="128" placeholder="再次输入密码"></label><p class="small-note">用户名只能注册一次，不区分大小写和首尾空格。注册后可以用用户名或账号 ID 登录。</p>' : ''}<p id="login-error" class="form-error" role="alert" hidden></p><button class="button primary" type="submit">${register ? '注册并登录' : '打开菜谱本'}</button></form>${!register ? '<button class="text-button recovery-back" data-action="auth-recovery">忘记密码？</button>' : ''}<p class="small-note">保持登录 90 天。普通账号默认仅可查看菜谱，编辑需要管理员授权；收藏各自独立。</p></section></div>`;
-  (register ? $('#register-name') : $('#login-username')).focus();
+  $('#auth-title').tabIndex = -1;
+  focusInitialField(register ? $('#register-name') : $('#login-username'), $('#auth-title'));
 }
 
 function showRecoveryRequest() {
   recoveryRequestId = createId();
   $('#app').inert = true; $('#modal-root').inert = true;
   $('#auth-root').innerHTML = recoveryView.request();
-  $('#password-recovery-form [name="username"]').focus();
+  $('#auth-title').tabIndex = -1;
+  focusInitialField($('#password-recovery-form [name="username"]'), $('#auth-title'));
 }
 
 async function submitRecoveryRequest(form) {
@@ -142,7 +150,7 @@ function recipePage() {
   const favoriteCount = recipes.filter(item => item.favorite).length;
   const categories = ['全部', ...new Set([...CATEGORIES.filter(item => recipes.some(recipe => recipe.category === item)), ...recipes.map(item => item.category)])];
   if (!categories.includes(category)) category = '全部';
-  return `<section class="hero"><div class="hero-content"><p class="eyebrow">A LITTLE TASTE OF HOME</p><h1>把喜欢的味道，<br>留在自己的厨房。</h1><p class="hero-copy">记下一道拿手菜，也记下生活的滋味。<br>下次想吃时，就翻开这本小小的菜谱。</p><div class="stats"><span class="stat"><strong>${recipes.length}</strong>道菜谱</span><span class="stat"><strong>${favoriteCount}</strong>道收藏</span><span class="stat"><strong>${new Set(recipes.map(item => item.category)).size}</strong>个分类</span></div></div><div class="hero-art">${heroArt}</div></section><section aria-label="菜谱列表"><div class="section-head"><div class="section-heading"><h2>${page === 'favorites' ? '我的收藏夹' : '共享菜谱'}</h2><span class="count" id="result-count">${recipes.length} 道</span></div>${db?.canEdit ? `<button class="button primary" data-action="new">${icon("plus")}记一道新菜</button>` : `<button class="button ghost" data-action="navigate" data-page="permissions">申请编辑权限</button>`}</div><div class="toolbar"><label class="search-box">${icon('search')}<input id="search" type="search" autocomplete="off" placeholder="搜菜名、食材或心得…" aria-label="搜索菜谱" value="${esc(query)}"></label><select id="sort" class="sort-select" aria-label="菜谱排序"><option value="updated" ${sort === 'updated' ? 'selected' : ''}>最近更新</option><option value="name" ${sort === 'name' ? 'selected' : ''}>菜名排序</option></select></div><div class="chips" role="group" aria-label="按分类筛选">${categories.map(item => `<button class="chip ${item === category ? 'active' : ''}" aria-pressed="${item === category}" data-action="category" data-category="${esc(item)}">${esc(item)}</button>`).join('')}</div><div id="results"></div><aside class="tip-card"><span class="tip-icon">${icon('leaf')}</span><div><h3>好味道，藏在那些小心得里</h3><p>“出锅前再加一勺醋”“妈妈说要小火慢炖”——把这些也一起记下来。</p></div></aside></section>`;
+  return `<section class="hero"><div class="hero-content"><p class="eyebrow">A LITTLE TASTE OF HOME</p><h1>把喜欢的味道，<br>留在自己的厨房。</h1><p class="hero-copy">记下一道拿手菜，也记下生活的滋味。<br>下次想吃时，就翻开这本小小的菜谱。</p><div class="stats"><span class="stat"><strong>${recipes.length}</strong>道菜谱</span><span class="stat"><strong>${favoriteCount}</strong>道收藏</span><span class="stat"><strong>${new Set(recipes.map(item => item.category)).size}</strong>个分类</span></div></div><div class="hero-art">${heroArt}</div></section><section aria-label="菜谱列表"><div class="section-head"><div class="section-heading"><h2>${page === 'favorites' ? '我的收藏夹' : '共享菜谱'}</h2><span class="count" id="result-count">${recipes.length} 道</span></div>${db?.canEdit ? `<button class="button primary" data-action="new">${icon("plus")}记一道新菜</button>` : `<button class="button ghost" data-action="navigate" data-page="permissions">申请编辑权限</button>`}</div><div class="toolbar"><label class="search-box">${icon('search')}<input id="search" type="search" enterkeyhint="search" autocomplete="off" placeholder="搜菜名、食材或心得…" aria-label="搜索菜谱" value="${esc(query)}"></label><select id="sort" class="sort-select" aria-label="菜谱排序"><option value="updated" ${sort === 'updated' ? 'selected' : ''}>最近更新</option><option value="name" ${sort === 'name' ? 'selected' : ''}>菜名排序</option></select></div><div class="chips" role="group" aria-label="按分类筛选">${categories.map(item => `<button class="chip ${item === category ? 'active' : ''}" aria-pressed="${item === category}" data-action="category" data-category="${esc(item)}">${esc(item)}</button>`).join('')}</div><div id="results"></div><aside class="tip-card"><span class="tip-icon">${icon('leaf')}</span><div><h3>好味道，藏在那些小心得里</h3><p>“出锅前再加一勺醋”“妈妈说要小火慢炖”——把这些也一起记下来。</p></div></aside></section>`;
 }
 
 function renderResults() {
@@ -179,7 +187,9 @@ function showModal(contents) {
   $('#modal-root').innerHTML = `<div class="modal-overlay"><section class="modal" role="dialog" aria-modal="true" aria-labelledby="modal-title">${contents}</section></div>`;
   $('#app').inert = true;
   document.body.classList.add('locked');
-  requestAnimationFrame(() => { ($('#recipe-title') || $('#modal-title'))?.focus({ preventScroll: true }); });
+  requestAnimationFrame(() => {
+    if (!$('#modal-root').inert) focusInitialField($('.modal input:not([type="file"]):not([type="hidden"]), .modal textarea'), $('#modal-title'));
+  });
 }
 
 async function ask(title, message, action, danger = false) {
@@ -187,8 +197,8 @@ async function ask(title, message, action, danger = false) {
   const previousFocus = document.activeElement;
   $('#confirm-root').innerHTML = `<div class="modal-overlay confirm-overlay"><section class="confirm-modal" role="alertdialog" aria-modal="true" aria-labelledby="confirm-title"><h2 id="confirm-title">${esc(title)}</h2><p>${esc(message)}</p><div class="buttons"><button class="button ghost" data-confirm="cancel">取消</button><button class="button ${danger ? 'danger' : 'primary'}" data-confirm="accept">${esc(action)}</button></div></section></div>`;
   $('#modal-root').inert = true;
-  $('[data-confirm="cancel"]').focus();
-  return new Promise(resolve => { confirmResolve = value => { $('#confirm-root').innerHTML = ''; $('#modal-root').inert = false; confirmResolve = null; previousFocus?.focus(); resolve(value); }; });
+  $('[data-confirm="cancel"]').focus({ preventScroll: true });
+  return new Promise(resolve => { confirmResolve = value => { $('#confirm-root').innerHTML = ''; $('#modal-root').inert = false; confirmResolve = null; previousFocus?.focus({ preventScroll: true }); resolve(value); }; });
 }
 
 async function closeModal() {
@@ -199,7 +209,7 @@ async function closeModal() {
   await stopWakeLock();
   editor = null; detailId = null; cookStep = null; permissionDecision = null;
   $('#modal-root').innerHTML = ''; $('#app').inert = $('#auth-root').hasChildNodes(); document.body.classList.remove('locked');
-  (restoreFocus?.isConnected ? restoreFocus : $('[data-action="new"]'))?.focus();
+  (restoreFocus?.isConnected ? restoreFocus : $('[data-action="new"]'))?.focus({ preventScroll: true });
 }
 
 function showDetail(id) {
@@ -536,7 +546,6 @@ function showChangePassword() {
   if (!db?.authenticated || passwordBusy) return;
   passwordMutationId = createId();
   showModal(`<div class="modal-header"><h2 id="modal-title" tabindex="-1">修改密码</h2><button class="icon-button" data-action="close" aria-label="关闭修改密码">${icon('close')}</button></div><div class="modal-scroll"><p class="page-lead">账号：${esc(db.user.displayName)}<br>修改成功后，此设备保持登录，其他设备需要用新密码重新登录。</p><form id="password-change-form"><label class="field"><span class="field-label">当前密码</span><input name="currentPassword" type="password" autocomplete="current-password" required maxlength="256"></label><label class="field"><span class="field-label">新密码</span><input name="newPassword" type="password" autocomplete="new-password" required minlength="8" maxlength="128" placeholder="设置 8～128 个字符的新密码"></label><label class="field"><span class="field-label">确认新密码</span><input name="confirmPassword" type="password" autocomplete="new-password" required minlength="8" maxlength="128" placeholder="再次输入新密码"></label><p id="password-change-error" class="form-error" role="alert" hidden></p><button type="submit" class="button primary">确认修改密码</button></form></div>`);
-  $('#password-change-form [name="currentPassword"]').focus();
 }
 
 async function submitPasswordChange(form) {
@@ -699,10 +708,13 @@ document.addEventListener('click', event => {
   if (button && !button.disabled) handleAction(button).catch(error => toast(errorText(error)));
 });
 document.addEventListener('input', event => {
-  if (event.target.id === 'search') { query = event.target.value; renderResults(); }
+  if (event.target.id === 'search') { query = event.target.value; if (!event.isComposing) renderResults(); }
   else if (event.target.closest('#login-form, #register-form')) { $('#login-error').hidden = true; if (event.target.closest('#register-form')) registrationId = createId(); }
   else if (event.target.closest('#password-change-form')) { passwordMutationId = createId(); $('#password-change-error').hidden = true; }
   else if (editor && event.target.closest('#recipe-form')) editor.dirty = true;
+});
+document.addEventListener('compositionend', event => {
+  if (event.target.id === 'search') { query = event.target.value; renderResults(); }
 });
 document.addEventListener('change', async event => {
   try {
@@ -735,6 +747,10 @@ document.addEventListener('submit', event => {
   }
 });
 document.addEventListener('keydown', event => {
+  // Enter confirms an IME candidate first; only a subsequent search action dismisses the keyboard.
+  if (event.key === 'Enter' && event.target.id === 'search' && !event.isComposing && event.keyCode !== 229) {
+    event.preventDefault(); event.target.blur(); return;
+  }
   if (event.key === 'Escape' && $('#auth-root').hasChildNodes()) return;
   if (event.key === 'Escape') { if (confirmResolve) confirmResolve(false); else if ($('#modal-root').hasChildNodes()) closeModal(); }
   if (event.key !== 'Tab') return;

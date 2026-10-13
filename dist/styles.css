@@ -24,3 +24,45 @@
 
 .full-backup-panel { margin-top: 24px; }
 .full-backup-passwords { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 18px; margin: 18px 0; }
+
+/* Keep touch controls readable without triggering focus zoom on mobile Safari. */
+html { -webkit-text-size-adjust: 100%; text-size-adjust: 100%; }
+button, a, select, input, textarea, label[for] { touch-action: manipulation; }
+.search-box { min-width: 0; }
+.search-box > .icon { flex-shrink: 0; }
+.sort-select { flex-shrink: 0; }
+.full-backup-passwords { grid-template-columns: repeat(auto-fit, minmax(min(100%, 220px), 1fr)); }
+.confirm-modal { max-height: calc(100dvh - 44px); overflow-y: auto; overscroll-behavior: contain; }
+.search-box input, .sort-select, .field input, .field textarea, .field select,
+.ingredient-row input, .step-row textarea, .audit-date input,
+.account-panel input, .account-panel #account-id, .auth-panel .field input { font-size: 16px; }
+
+@media (max-width: 760px), (any-pointer: coarse) {
+  .sort-select { min-height: 44px; max-width: 128px; }
+  .button, .section-head > .button, .chip, .add-row, .text-button,
+  .sync-bar .text-button, .photo-actions button, .mobile-nav .nav-item { min-height: 44px; }
+  .icon-button, .favorite-button, .detail-actions .favorite-button, .remove-row {
+    width: 44px; height: 44px; min-width: 44px; flex-shrink: 0;
+  }
+  .ingredient-row { grid-template-columns: minmax(0, 1.4fr) minmax(0, 1fr) 44px; }
+  .step-row textarea { min-width: 0; }
+  .modal-scroll { scroll-padding-block: 20px; }
+  .audit-date { min-width: 0; flex: 1 1 145px; }
+  .audit-date input { width: 100%; min-width: 0; }
+}
+
+@media (hover: none) {
+  .recipe-card:hover { transform: none; box-shadow: none; }
+}
+
+@media (max-width: 520px) {
+  .shell { padding-left: max(20px, env(safe-area-inset-left)); padding-right: max(20px, env(safe-area-inset-right)); }
+  .search-box input { padding-block: 12px; }
+  .sort-select { max-width: 116px; }
+  .field-row { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .field-row .field:first-child { grid-column: 1 / -1; }
+  .form-section-title { align-items: flex-start; flex-wrap: wrap; gap: 6px; }
+  .modal-footer { flex-wrap: wrap; }
+  .mobile-nav { gap: 0; }
+  .mobile-nav .nav-item { flex: 1; }
+}
