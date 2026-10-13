@@ -1,3 +1,4 @@
+import { canPruneAudit, isAuditObject, retainedRecord } from './audit-retention.mjs';
 import { createHash, randomUUID } from 'node:crypto';
 import { AUDIT_PREFIX, auditTerms } from './audit-index.mjs';
 
@@ -31,7 +32,7 @@ export function createAccountStore(source, { url, secretKey, namespace = 'fengwe
         if (isAccountKey(key)) await requireUnmigrated();
         return source.setJSON(key, value, options);
       },
-      async delete(key) { if (!/^photos\/[a-f0-9]{64}\.(txt|bin)$/.test(key)) throw unavailable('ACCOUNT_DATABASE_UNSUPPORTED_KEY'); return source.delete(key); },
+      async delete(key) { if (!isAuditObject(key) && !/^photos\/[a-f0-9]{64}\.(txt|bin)$/.test(key)) throw unavailable('ACCOUNT_DATABASE_UNSUPPORTED_KEY'); return source.delete(key); },
     };
   }
   return new SupabaseAccountStore(source, { url, secretKey, namespace, send });
@@ -120,7 +121,32 @@ class SupabaseAccountStore {
     if (!/^private\/audit-pending\/[a-f0-9]{64}\.json$/.test(key)) throw unavailable('ACCOUNT_DATABASE_UNSUPPORTED_KEY');
     if (this.source.delete) await this.source.delete(key);
   }
-  async delete(key) { if (!/^photos\/[a-f0-9]{64}\.(txt|bin)$/.test(key)) throw unavailable('ACCOUNT_DATABASE_UNSUPPORTED_KEY'); return this.source.delete(key); }
+  async delete(key) {
+    if (!isAuditObject(key) && !/^photos\/[a-f0-9]{64}\.(txt|bin)$/.test(key)) throw unavailable('ACCOUNT_DATABASE_UNSUPPORTED_KEY');
+    if (isAccountKey(key)) await this.request('DELETE', [['namespace', `eq.${this.namespace}`], ['key', `eq.${key}`], ['select', 'namespace,key,value']], undefined, 'return=representation');
+    await this.source.delete(key);
+  }
+  async checkAuditDelete() {
+    // Permission probe cannot match a real log key (which is a SHA-256 ID or
+    // timestamp plus SHA-256). No production record is created or removed.
+    await this.request('DELETE', [['namespace', `eq.${this.namespace}`], ['key', `eq.private/audit-index/delete-permission-probe-${randomUUID()}.json`], ['select', 'namespace,key,value']], undefined, 'return=representation');
+  }
+  async pruneAuditRecord(key, cutoff) {
+    if (!canPruneAudit(key)) throw unavailable('ACCOUNT_DATABASE_UNSUPPORTED_KEY');
+    // Clean legacy Blob copies as well as SQL; stale credentials/receipts must
+    // not be resurrected if a SQL record is read or migrated later.
+    const clean = async (value, write, remove) => {
+      if (!value) return;
+      const next = retainedRecord(key, value, cutoff);
+      if (next === null) await remove(); else if (next !== value) await write(next);
+    };
+    if (isAccountKey(key)) {
+      const row = await this.readRecord(key);
+      await clean(row?.value, value => this.writeRecord(key, value, false), () => this.request('DELETE', [['namespace', `eq.${this.namespace}`], ['key', `eq.${key}`], ['select', 'namespace,key,value']], undefined, 'return=representation'));
+    }
+    const legacy = await this.source.get(key, { type: 'json', consistency: 'strong' });
+    await clean(legacy, value => this.source.setJSON(key, value, { cacheControl: 'no-store' }), () => this.source.delete(key));
+  }
   async accountSnapshot(id) {
     if (!/^usr_[a-f0-9]{32}$/.test(id)) throw unavailable('ACCOUNT_DATABASE_UNSUPPORTED_KEY');
     const changes = `private/password-changes/${id}/`, marker = `private/account-migrations/${id}.json`;

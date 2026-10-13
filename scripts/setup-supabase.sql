@@ -10,6 +10,6 @@ create table if not exists public.fengwei_account_records (
 -- Account and password records are server-only. No browser role has access.
 alter table public.fengwei_account_records enable row level security;
 revoke all on public.fengwei_account_records from public, anon, authenticated;
-grant select, insert, update on public.fengwei_account_records to service_role;
+grant select, insert, update, delete on public.fengwei_account_records to service_role;
 
 notify pgrst, 'reload schema';

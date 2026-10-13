@@ -1,3 +1,5 @@
+import { FullBackup, snapshotTime } from './full-backup.mjs';
+import { AuditRetention } from './audit-retention.mjs';
 import { hash, RecipeDatabase } from './database.mjs';
 import { validateRecipe } from '../dist/store.js';
 import { createAuth, testAccount, sessionCookie } from './auth.mjs';
@@ -58,11 +60,20 @@ export function createApi({ database, password }) {
       catch (error) { if (error.status) throw error; fail(400, 'INVALID_PHOTO_PACKET', '照片上传不完整，请重试。'); }
     };
     try {
+      const migration = await store.get('private/full-restore.json', { type: 'json', consistency: 'strong' });
+      if (migration && !migration.complete) fail(503, 'MIGRATION_INCOMPLETE', '本站正在恢复完整备份，请等待迁移校验完成后再使用。');
       if (!auth.configured) fail(503, 'NOT_CONFIGURED', '服务器账号尚未完成配置，请重新部署完整的峰味上传包。');
       const url = new URL(request.url), route = url.pathname.replace(/^.*?\/api\//, ''), method = request.method;
       if (url.protocol !== 'https:' && !['localhost', '127.0.0.1', '[::1]'].includes(url.hostname)) fail(400, 'HTTPS_REQUIRED', '请通过 HTTPS 正式网址使用私人菜谱本。');
       if (!['GET', 'POST', 'PUT', 'DELETE'].includes(method)) fail(405, 'METHOD_NOT_ALLOWED', '不支持的请求方式。');
       if (method !== 'GET') writableOrigin(request);
+      if (route === 'maintenance/audit' && method === 'POST') {
+        // Fixed server policy only: no caller-controlled keys, dates or scope.
+        await limits.consume('audit-maintenance', 'global', 1, 60000, 'TRY_LATER', '清理正在进行，请稍后重试。');
+        await store.checkAuditDelete?.();
+        const result = await new AuditRetention(store).run({ maxRecords: 2000, budgetMs: 15000 });
+        return reply({ ok: true, complete: !!result.completedAt });
+      }
       if (route === 'health' && method === 'GET') {
         // No accounts or credentials are returned or created. This uses the
         // same bounded capability check required before every registration.
@@ -115,6 +126,20 @@ export function createApi({ database, password }) {
         return reply({ ok: true }, 200, { 'Set-Cookie': sessionCookie(request, '', 0) });
       }
       if (route === 'me' && method === 'GET') return reply({ user });
+      if (route.startsWith('admin/backup/') && method === 'POST') {
+        if (user.role !== 'admin') fail(403, 'ADMIN_REQUIRED', '只有 wupanfeng 管理员可以生成完整迁移备份。');
+        const data = await body(request, 16384);
+        if (data?.expectedUserId !== user.id) fail(409, 'ACCOUNT_CHANGED', '账号已切换，请重新登录后生成备份。');
+        const backup = new FullBackup(store);
+        if (route === 'admin/backup/start') {
+          action = 'backup.full'; target = '完整迁移备份'; await record('success');
+          return reply({ userId: user.id, snapshotAt: new Date().toISOString(), retentionDays: 7 });
+        }
+        snapshotTime(data.snapshotAt);
+        if (route === 'admin/backup/catalog') return reply({ userId: user.id, ...await backup.catalog(data.cursor) });
+        if (route === 'admin/backup/read') return reply({ userId: user.id, ...await backup.chunk(data.key, data.snapshotAt, data.offset) });
+        if (route === 'admin/backup/verify') return reply({ userId: user.id, ...await backup.verify(data.items, data.snapshotAt) });
+      }
       if (route === 'admin/photos' && method === 'GET') {
         if (user.role !== 'admin') fail(403, 'ADMIN_REQUIRED', '只有管理员可以管理图片空间。');
         const cursor = url.searchParams.get('cursor') || '';

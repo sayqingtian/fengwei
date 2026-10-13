@@ -156,3 +156,11 @@ npm run dev 默认只监听 localhost:4173。本地文件数据库位于 .data/f
 - [Blob 存储](https://pages.edgeone.ai/document/blob-storage)
 - [Supabase API Keys](https://supabase.com/docs/guides/getting-started/api-keys)
 - [PostgREST Upsert](https://docs.postgrest.org/en/stable/references/api/tables_views.html#upsert)
+
+## 完整迁移备份与 7 天日志
+
+完整备份仅管理员可用，生成 `.fengwei` 加密分卷；恢复步骤见 [MIGRATION.md](MIGRATION.md)。无需新增密钥或数据表，现有数据库需具有 `service_role` 的 DELETE 权限；新安装的 `setup-supabase.sql` 已包含。浏览器角色依旧禁止访问账号表。
+
+`edgeone.json` 与上传 ZIP 均包含 `fengwei-audit-retention` 定时任务，每日 03:15（Asia/Shanghai）触发 `/api/maintenance/audit`。部署后核对定时任务状态，并调用该端点确认返回 200；请求频率受限时返回 429。处理较多旧数据时返回 `complete: false`，下次调用从保存位置继续。
+
+新版 service worker 为 v18。部署完成后刷新页面，在“我的 → 菜谱备份”检查完整备份入口，在“操作日志”查看 7 天保留说明。

@@ -23,6 +23,7 @@ export function requestStore(source) {
     return clone(await cache.get(key));
   }
   function invalidate() { const scope = context.getStore(); if (scope) for (const cache of Object.values(scope)) cache.clear(); }
+  function evict(key) { for (const [cacheKey, item] of retained) if (JSON.parse(cacheKey)[0] === key) { bytes -= item.size; retained.delete(cacheKey); } }
   async function indexReceipt(key, value) {
     if (!source.queryAudit) return;
     const entry = key.startsWith('private/audit/') ? value : value?.auditEntry;
@@ -64,10 +65,12 @@ export function requestStore(source) {
       delete result.records;
       return result;
     },
-    async set(key, value, options) { invalidate(); const result = await source.set(key, value, options); invalidate(); return result; },
-    async setJSON(key, value, options) { invalidate(); const result = await source.setJSON(key, value, options); invalidate(); await indexReceipt(key, value); return result; },
+    async set(key, value, options) { invalidate(); evict(key); const result = await source.set(key, value, options); invalidate(); return result; },
+    async setJSON(key, value, options) { invalidate(); evict(key); const result = await source.setJSON(key, value, options); invalidate(); await indexReceipt(key, value); return result; },
     async delete(key) { invalidate(); const result = await source.delete(key); invalidate(); for (const [cacheKey, item] of retained) if (JSON.parse(cacheKey)[0] === key) { bytes -= item.size; retained.delete(cacheKey); } return result; },
   };
+  if (source.checkAuditDelete) store.checkAuditDelete = () => source.checkAuditDelete();
+  if (source.pruneAuditRecord) store.pruneAuditRecord = async (key, cutoff) => { invalidate(); evict(key); try { return await source.pruneAuditRecord(key, cutoff); } finally { invalidate(); evict(key); } };
   if (source.accountSnapshot) store.accountSnapshot = id => memo('accounts', id, () => source.accountSnapshot(id));
   if (source.consumeRateLimit) store.consumeRateLimit = (key, options) => source.consumeRateLimit(key, options);
   if (source.queryAudit) {

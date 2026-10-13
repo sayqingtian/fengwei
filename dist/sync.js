@@ -230,6 +230,12 @@ export async function createRemoteStore(local) {
       job.promise = synchronize(job).finally(() => { if (syncing === job) syncing = null; }); syncing = job;
       return job.promise;
     },
+    async fullBackupRequest(action, value) {
+      const expectedUserId = user?.id;
+      if (user?.role !== 'admin') throw new ApiError('只有管理员可以生成完整备份。', 403, 'ADMIN_REQUIRED');
+      const data = await request(`admin/backup/${action}`, { method: 'POST', value: { ...value, expectedUserId } });
+      await sameAccount(data); return data;
+    },
     async backupSnapshot() {
       const epoch = accountEpoch, expectedUserId = user?.id;
       if (!expectedUserId) throw new ApiError('请先登录后生成备份。', 401, 'LOGIN_REQUIRED');

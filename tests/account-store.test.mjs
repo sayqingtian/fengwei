@@ -38,6 +38,10 @@ function fixture() {
     assert.equal(target.pathname, '/rest/v1/fengwei_account_records');
     assert.ok(headers.get('apikey'));
     requests.push({ method: options.method, url: target, headers, key: options.body ? JSON.parse(options.body).key : undefined });
+    if (options.method === 'DELETE') {
+      const result = await pg.query('delete from fengwei_account_records where namespace=$1 and key=$2 returning namespace,key,value', [target.searchParams.get('namespace').slice(3), target.searchParams.get('key').slice(3)]);
+      return Response.json(result.rows);
+    }
     if (options.method === 'PATCH') {
       const value = JSON.parse(options.body).value;
       const result = await pg.query("update fengwei_account_records set value=$1::jsonb where namespace=$2 and key=$3 and value->>'version'=$4 returning namespace,key,value", [JSON.stringify(value), target.searchParams.get('namespace').slice(3), target.searchParams.get('key').slice(3), target.searchParams.get('value->>version').slice(3)]);
@@ -337,4 +341,52 @@ test('migrating an already deleted Blob account never revives its login or old c
   assert.equal((await f.call(migrated, 'me', 'GET', undefined, cookie)).status, 401);
   assert.equal((await f.call(migrated, 'login', 'POST', { username: user.id, password: fixturePassword })).status, 401);
   assert.equal((await f.store().accountSnapshot(user.id)).get(`private/deleted-users/${user.id}.json`).id, user.id);
+});
+
+
+test('SQL audit retention deletes only expired logs, cleans legacy Blob copies, and preserves account credential revisions', async () => {
+  const { AuditRetention } = await import('../server/audit-retention.mjs');
+  const f = fixture(), store = f.store(), now = Date.now();
+  const old = { id: 'a'.repeat(64), createdAt: new Date(now - 8 * 86400000).toISOString(), action: 'account.password', result: 'success' };
+  const recent = { ...old, id: 'b'.repeat(64), createdAt: new Date(now).toISOString() };
+  for (const entry of [old, recent]) for (const prefix of ['private/audit-canonical/', 'private/audit-index/', 'private/audit/', 'private/audit-pending/']) {
+    const key = `${prefix}${entry.id}.json`; await store.setJSON(key, entry); await f.source.setJSON(key, entry);
+  }
+  const key = 'private/password-changes/usr_' + 'c'.repeat(32) + '/initial.json';
+  const value = { passwordHash: 'protected-password-hash', salt: 'protected-salt', auditEntry: old };
+  await store.setJSON(key, value); await f.source.setJSON(key, value);
+  const retention = new AuditRetention(store); let progress;
+  do { progress = await retention.run({ now, budgetMs: 5000 }); } while (!progress.complete);
+  const rows = await pg.query('select key,value from fengwei_account_records where namespace=$1', [f.namespace]);
+  assert.ok(rows.rows.every(row => !row.key.includes(old.id)));
+  assert.ok([...f.source.records.keys()].every(key => !key.includes(old.id)));
+  assert.deepEqual(await store.get(key, { type: 'json' }), { passwordHash: value.passwordHash, salt: value.salt });
+  assert.deepEqual(await f.source.get(key, { type: 'json' }), { passwordHash: value.passwordHash, salt: value.salt });
+  assert.ok(rows.rows.some(row => row.key.includes(recent.id)));
+  await assert.rejects(() => store.delete(key), { code: 'ACCOUNT_DATABASE_UNSUPPORTED_KEY' });
+});
+
+
+test('complete backup moves SQL accounts and Blob data into an independent empty cloud namespace', async () => {
+  const { prepareFullBackup } = await import('../dist/full-backup.js');
+  const { readFullBackup, restoreFullBackup } = await import('../server/full-restore.mjs');
+  const source = fixture(), target = fixture(), api = source.api();
+  const response = await source.call(api, 'login', 'POST', { username: 'wupanfeng', password: fixturePassword });
+  const cookie = cookieOf(response), user = (await response.json()).user;
+  const member = await source.call(api, 'register', 'POST', { displayName: '跨数据库迁移', password: fixturePassword, registrationId: randomUUID() });
+  const memberUser = (await member.json()).user;
+  const client = { user, async fullBackupRequest(action, data) {
+    const response = await source.call(api, `admin/backup/${action}`, 'POST', { ...data, expectedUserId: user.id }, cookie);
+    assert.equal(response.status, 200); return response.json();
+  } };
+  const result = await prepareFullBackup(client, 'cross-cloud-backup-fixture');
+  const archive = await readFullBackup(await Promise.all(result.files.map(part => part.file.text())), 'cross-cloud-backup-fixture');
+  await restoreFullBackup(target.store(), archive);
+  const restored = target.api();
+  assert.equal((await target.call(restored, 'login', 'POST', { username: memberUser.id, password: fixturePassword })).status, 200);
+  assert.equal((await target.call(restored, 'login', 'POST', { username: 'wupanfeng', password: fixturePassword })).status, 200);
+  assert.equal((await target.call(restored, 'me', 'GET', undefined, cookie)).status, 401);
+  const binding = await target.source.get('private/account-database-binding.json', { type: 'json' });
+  assert.equal(binding.namespace, target.namespace);
+  assert.ok(![...target.source.records.keys()].some(key => key.startsWith('private/users/')));
 });

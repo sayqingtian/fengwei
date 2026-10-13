@@ -1,10 +1,11 @@
+import { AuditRetention, auditCutoff } from './audit-retention.mjs';
 import { randomUUID } from 'node:crypto';
 import { hash } from './database.mjs';
 
 import { AUDIT_ACTIONS } from './audit-actions.mjs';
 import { auditCursor, auditMatches, publicAudit, indexAudit } from './audit-index.mjs';
 export { AUDIT_ACTIONS } from './audit-actions.mjs';
-const legacyPrefixes = ['private/audit/', 'recipes/', 'private/permissions/', 'private/permission-requests/', 'private/password-changes/', 'private/password-recovery-requests/', 'private/deleted-users/'];
+const legacyPrefixes = ['private/audit/', 'recipes/', 'private/permissions/', 'private/permission-requests/', 'private/password-changes/', 'private/password-recovery-requests/', 'private/deleted-users/', 'private/password-recovery-decisions/', 'private/photo-optimizations/'];
 const migrationKey = 'private/audit-migration/v1.json';
 export class AuditLog {
   constructor(store) { this.store = store; this.index = entry => store.indexAudit ? store.indexAudit(entry) : indexAudit(store, entry); }
@@ -22,6 +23,7 @@ export class AuditLog {
     if (this.store.queryAudit && !this.store.indexAudit) await this.index(entry);
   }
   async prepare() {
+    await new AuditRetention(this.store).run();
     if (!this.store.queryAudit) return { complete: true };
     const pending = await this.store.list({ prefix: 'private/audit-pending/', consistency: 'strong' });
     const repairing = Date.now(); let repaired = 0;
@@ -57,6 +59,7 @@ export class AuditLog {
     return state;
   }
   async filtered({ query = '', result = '', from = '', to = '' } = {}) {
+    from = from > auditCutoff() ? from : auditCutoff();
     if (this.store.queryAudit) {
       const progress = await this.prepare();
       if (!progress.complete) throw Object.assign(new Error('历史日志正在整理，请等待日志列表加载完成后再导出。'), { status: 503, code: 'AUDIT_INDEX_BUILDING' });
@@ -85,6 +88,7 @@ export class AuditLog {
       .sort((a, b) => b.createdAt.localeCompare(a.createdAt) || b.id.localeCompare(a.id));
   }
   async list({ cursor = '', query = '', result = '', from = '', to = '' } = {}) {
+    from = from > auditCutoff() ? from : auditCutoff();
     if (this.store.queryAudit) {
       const progress = await this.prepare();
       if (!progress.complete) return { items: [], cursor: null, indexing: { processed: progress.processed } };

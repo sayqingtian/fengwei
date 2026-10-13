@@ -1,3 +1,4 @@
+import { prepareFullBackup, fullBackupPanel } from './full-backup.js';
 import { myPages, roleName } from './my.js';
 import { recoveryPages } from './recovery.js';
 import { compressPhoto, optimizeDataPhoto, photoSize } from './photo.js';
@@ -8,8 +9,10 @@ import { CATEGORIES, createId, openStore, validateRecipe, filterRecipes, parseBa
 const $ = (selector, root = document) => root.querySelector(selector);
 const esc = value => String(value ?? '').replace(/[&<>"']/g, char => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[char]);
 let accountDeletion = null;
+let fullBackupGeneration = 0;
+let fullBackupBusy = false, fullBackupProgress = '', fullBackupError = '', fullBackupPrepared = null;
 let backupBusy = false, backupError = '', preparedBackup = null, backupGeneration = 0;
-function resetBackup() { backupGeneration++; backupBusy = false; backupError = ''; preparedBackup = null; }
+function resetBackup() { fullBackupGeneration++; fullBackupBusy = false; fullBackupProgress = ''; fullBackupError = ''; fullBackupPrepared = null; backupGeneration++; backupBusy = false; backupError = ''; preparedBackup = null; }
 let imageData = null, imageBusy = false, imageStop = false, imageProgress = '', imageError = '', imageSaved = 0;
 const paths = {
   bowl: '<path d="M3 11h18c-.6 6-4.1 9-9 9s-8.4-3-9-9Z"/><path d="M9 23h6M8 7c-3-3 3-3 0-6M13 7c-3-3 3-3 0-6"/>',
@@ -160,7 +163,7 @@ function emptyState() {
 }
 
 function backupPage() {
-  return `<h1 class="page-title">给好味道，留一份备份。</h1><p class="page-lead">菜谱和照片已保存到服务器。也可以导出一份备份，<br>把厨房记忆留在自己的“文件”里。</p><div class="backup-grid"><section class="panel">${backupExportPanel({ busy: backupBusy, error: backupError, prepared: preparedBackup?.userId === db?.user?.id ? preparedBackup : null, lastBackup, esc, icon })}</section><section class="panel"><div class="panel-icon orange">${icon('upload')}</div><h2>恢复一份备份</h2><p>支持峰味和旧版拾味的备份。确认后更新共享菜谱，相同菜谱保留较新版本。收藏只加入当前账号，保留现有收藏。</p>${db?.canEdit ? `<button class="button ghost" data-action="choose-import">${icon("upload")}选择备份文件</button><input id="import-file" type="file" accept=".json,application/json" hidden><p class="small-note">保留现有菜谱 · 每份最多 50 MiB、10000 道 · 分卷请逐份导入</p>${pendingImport ? importSummary() : ""}` : `<p class="permission-note">导入备份需要编辑权限。</p><button class="button ghost" data-action="navigate" data-page="permissions">申请编辑权限</button>`}</section></div>${legacyCount && db?.canEdit ? `<section class="panel migration-panel"><h2>迁移本机的旧菜谱</h2><p>检测到这个网址下原先保存的 ${legacyCount} 道菜谱。确认上传后，它们会保存在服务器；本机原数据仍保留。</p><button class="button primary" data-action="migrate">上传本机旧菜谱</button></section>` : ''}<section class="info-panel"><h2>共享菜谱，收藏分开。</h2><div class="info-row">${icon('lock')}<div><h3>菜谱共享，收藏独立</h3><p>登录后都能查看菜谱；新增、编辑、删除和导入需要管理员授权。收藏只属于当前账号，其他账号不会看到你的收藏状态。</p></div></div><div class="info-row">${icon('phone')}<div><h3>放到 iPhone 桌面，随手翻开</h3><p>Safari → 分享 → 添加到主屏幕。登录后从桌面图标使用。</p></div></div><div class="info-row">${icon('wifi')}<div><h3>${offlineReady ? '离线页面已准备好' : '离线查看'}</h3><p>已同步的菜谱可在离线时查看。新增、编辑、删除和导入需要联网，保存成功后才会同步到服务器。退出登录会清除此设备的服务器缓存。</p></div></div><div class="info-row">${icon('backup')}<div><h3>历史版本与独立备份</h3><p>每次服务器保存都会保留历史版本，可在菜谱详情中恢复最近的版本。服务器存储额度用完时会明确提示失败；仍建议定期导出独立菜谱备份。备份不包含账号、权限、日志或全部历史。</p></div></div></section>`;
+  return `<h1 class="page-title">给好味道，留一份备份。</h1><p class="page-lead">菜谱和照片已保存到服务器。也可以导出一份备份，<br>把厨房记忆留在自己的“文件”里。</p><div class="backup-grid"><section class="panel">${backupExportPanel({ busy: backupBusy, error: backupError, prepared: preparedBackup?.userId === db?.user?.id ? preparedBackup : null, lastBackup, esc, icon })}</section><section class="panel"><div class="panel-icon orange">${icon('upload')}</div><h2>恢复一份备份</h2><p>支持峰味和旧版拾味的备份。确认后更新共享菜谱，相同菜谱保留较新版本。收藏只加入当前账号，保留现有收藏。</p>${db?.canEdit ? `<button class="button ghost" data-action="choose-import">${icon("upload")}选择备份文件</button><input id="import-file" type="file" accept=".json,application/json" hidden><p class="small-note">保留现有菜谱 · 每份最多 50 MiB、10000 道 · 分卷请逐份导入</p>${pendingImport ? importSummary() : ""}` : `<p class="permission-note">导入备份需要编辑权限。</p><button class="button ghost" data-action="navigate" data-page="permissions">申请编辑权限</button>`}</section></div>${fullBackupPanel({ user: db?.user, busy: fullBackupBusy, progress: fullBackupProgress, error: fullBackupError, prepared: fullBackupPrepared?.userId === db?.user?.id ? fullBackupPrepared : null, esc })}${legacyCount && db?.canEdit ? `<section class="panel migration-panel"><h2>迁移本机的旧菜谱</h2><p>检测到这个网址下原先保存的 ${legacyCount} 道菜谱。确认上传后，它们会保存在服务器；本机原数据仍保留。</p><button class="button primary" data-action="migrate">上传本机旧菜谱</button></section>` : ''}<section class="info-panel"><h2>共享菜谱，收藏分开。</h2><div class="info-row">${icon('lock')}<div><h3>菜谱共享，收藏独立</h3><p>登录后都能查看菜谱；新增、编辑、删除和导入需要管理员授权。收藏只属于当前账号，其他账号不会看到你的收藏状态。</p></div></div><div class="info-row">${icon('phone')}<div><h3>放到 iPhone 桌面，随手翻开</h3><p>Safari → 分享 → 添加到主屏幕。登录后从桌面图标使用。</p></div></div><div class="info-row">${icon('wifi')}<div><h3>${offlineReady ? '离线页面已准备好' : '离线查看'}</h3><p>已同步的菜谱可在离线时查看。新增、编辑、删除和导入需要联网，保存成功后才会同步到服务器。退出登录会清除此设备的服务器缓存。</p></div></div><div class="info-row">${icon('backup')}<div><h3>历史版本与独立备份</h3><p>每次服务器保存都会保留历史版本，可在菜谱详情中恢复最近的版本。服务器存储额度用完时会明确提示失败；仍建议定期导出独立菜谱备份。普通菜谱备份不含账号与全部历史；管理员完整备份可用于全站迁移。</p></div></div></section>`;
 }
 
 function importSummary() {
@@ -339,6 +342,27 @@ async function saveBackupPart(index, share = false) {
   db.activity('backup.export').catch(() => {});
   if (preparedBackup === prepared && page === 'backup') render();
   toast('已发起保存，请确认备份文件已保存到设备。');
+}
+
+async function generateFullBackup(form) {
+  if (fullBackupBusy) return;
+  let password = form.elements.backupPassword.value;
+  if (password !== form.elements.backupConfirm.value) { fullBackupError = '两次备份口令不一致'; render(); return; }
+  const generation = ++fullBackupGeneration;
+  form.reset(); fullBackupBusy = true; fullBackupPrepared = null; fullBackupError = ''; render();
+  try {
+    const result = await prepareFullBackup(db, password, progress => { if (generation === fullBackupGeneration) { fullBackupProgress = progress; if (page === 'backup') render(); } });
+    if (generation === fullBackupGeneration) { fullBackupPrepared = result; fullBackupProgress = '已完成完整性校验和加密，请下载全部分卷。'; }
+  } catch (error) { if (generation === fullBackupGeneration) { fullBackupError = errorText(error); fullBackupProgress = ''; } }
+  finally { password = ''; if (generation === fullBackupGeneration) { fullBackupBusy = false; if (page === 'backup') render(); } }
+}
+function downloadFullBackup(index) {
+  const prepared = fullBackupPrepared, part = prepared?.files[index];
+  if (!part || db.user?.role !== 'admin' || prepared.userId !== db.user?.id) return;
+  const url = URL.createObjectURL(part.file), link = document.createElement('a');
+  link.href = url; link.download = part.file.name; document.body.append(link); link.click(); link.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 60000); part.downloaded = true; render();
+  toast('已发起保存，请保管好全部分卷和备份口令。');
 }
 
 async function loadBackup(file) {
@@ -659,6 +683,7 @@ async function handleAction(button) {
     case 'cook-back': if (cookStep > 0) { cookStep--; renderCook(); } break;
     case 'cook-next': if (cookStep === findRecipe(detailId).steps.length - 1) { const currentId = detailId; await stopWakeLock(); showDetail(currentId); toast('做好了，好好吃饭'); } else { cookStep++; renderCook(); } break;
     case 'export': await exportBackup(); break;
+    case 'download-full-backup': downloadFullBackup(Number(button.dataset.index)); break;
     case 'download-backup-part': await saveBackupPart(Number(button.dataset.index)); break;
     case 'share-backup-part': await saveBackupPart(Number(button.dataset.index), true); break;
     case 'choose-import': $('#import-file').click(); break;
@@ -698,6 +723,7 @@ document.addEventListener('submit', event => {
   const form = event.target;
   if (form.id === 'password-recovery-form') { event.preventDefault(); submitRecoveryRequest(form); return; }
   if (form.id === 'recovery-decision-form') { event.preventDefault(); submitRecoveryDecision(form); return; }
+  if (form.id === 'full-backup-form') { event.preventDefault(); generateFullBackup(form); return; }
   if (form.id === 'recipe-form') { event.preventDefault(); saveRecipe(); }
   else if (['login-form', 'register-form'].includes(form.id)) { event.preventDefault(); login(form); }
   else if (form.id === 'password-change-form') { event.preventDefault(); submitPasswordChange(form); }
@@ -719,7 +745,7 @@ document.addEventListener('keydown', event => {
   if (event.shiftKey && (document.activeElement === first || !controls.includes(document.activeElement))) { event.preventDefault(); last?.focus(); }
   else if (!event.shiftKey && document.activeElement === last) { event.preventDefault(); first?.focus(); }
 });
-window.addEventListener('beforeunload', event => { if (editor?.dirty || imageBusy || backupBusy) { event.preventDefault(); event.returnValue = ''; } });
+window.addEventListener('beforeunload', event => { if (editor?.dirty || imageBusy || backupBusy || fullBackupBusy) { event.preventDefault(); event.returnValue = ''; } });
 window.addEventListener('online', () => { toast('网络已连接，请同步服务器菜谱后再修改。'); if (db && !editor && !$('#modal-root').hasChildNodes() && !$('#auth-root').hasChildNodes()) refresh().catch(error => toast(errorText(error))); });
 window.addEventListener('offline', () => toast('已离线，已同步的菜谱仍可查看；修改需要联网保存。'));
 window.addEventListener('fengwei:permissions-changed', () => { permissionData = null; render(); });
