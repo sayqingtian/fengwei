@@ -184,6 +184,7 @@ export async function createRemoteStore(local) {
         if (first) {
           const principal = data.user || (await request('me')).user;
           if (job.epoch !== accountEpoch) throw new ApiError('账号已切换，本次同步已取消。', 409, 'ACCOUNT_CHANGED');
+          if (job.expectedUserId && principal?.id !== job.expectedUserId) throw new ApiError('账号已切换，请重新登录后生成备份。', 409, 'ACCOUNT_CHANGED');
           await acceptUser(principal); job.epoch = accountEpoch; first = false;
         }
         await sameAccount(data);
@@ -210,7 +211,7 @@ export async function createRemoteStore(local) {
       if (error.status === 401) throw error;
       if (job.epoch !== accountEpoch) throw new ApiError('账号已切换，本次同步已取消。', 409, 'ACCOUNT_CHANGED');
       if (version !== dataEpoch) return synchronize(job);
-      if ((error.code === 'NETWORK' || error.code === 'STORAGE_UNAVAILABLE') && snapshot?.user && Date.now() - snapshot.authenticatedAt < CACHE_AGE) { offline = true; authenticated = true; return records; }
+      if (!job.requireOnline && (error.code === 'NETWORK' || error.code === 'STORAGE_UNAVAILABLE') && snapshot?.user && Date.now() - snapshot.authenticatedAt < CACHE_AGE) { offline = true; authenticated = true; return records; }
       throw error;
     }
   }
@@ -228,6 +229,22 @@ export async function createRemoteStore(local) {
       const job = { epoch: accountEpoch };
       job.promise = synchronize(job).finally(() => { if (syncing === job) syncing = null; }); syncing = job;
       return job.promise;
+    },
+    async backupSnapshot() {
+      const epoch = accountEpoch, expectedUserId = user?.id;
+      if (!expectedUserId) throw new ApiError('请先登录后生成备份。', 401, 'LOGIN_REQUIRED');
+      const checkAccount = () => {
+        if (epoch !== accountEpoch || user?.id !== expectedUserId) throw new ApiError('账号已切换，备份已取消。', 409, 'ACCOUNT_CHANGED');
+      };
+      // An already-running sync may have started before the export click.
+      // Wait for it, then fetch every page again with cache fallback disabled.
+      if (syncing) await syncing.promise.catch(() => {});
+      checkAccount();
+      const job = { epoch, expectedUserId, requireOnline: true };
+      job.promise = synchronize(job).finally(() => { if (syncing === job) syncing = null; }); syncing = job;
+      const latest = await job.promise;
+      checkAccount();
+      return { recipes: structuredClone(latest), userId: expectedUserId, syncedAt: new Date().toISOString() };
     },
     put: (recipe, options) => write(recipe.id, recipe, 'PUT', options),
     remove: id => write(id, null, 'DELETE'),
