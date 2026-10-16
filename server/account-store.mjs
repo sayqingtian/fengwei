@@ -1,11 +1,13 @@
+import { photoLeaseState, photoBusy } from './photo-access.mjs';
 import { canPruneAudit, isAuditObject, retainedRecord } from './audit-retention.mjs';
 import { createHash, randomUUID } from 'node:crypto';
 import { AUDIT_PREFIX, auditTerms } from './audit-index.mjs';
 
+const removablePhotoMetadata = key => /^private\/photo-(optimizations|optimized)\/[a-f0-9]{64}\.json$/.test(key);
 const removableRecipeObject = key => /^recipes\/[a-f0-9]{64}\/\d{12}-\d{13}-[a-zA-Z0-9-]{8,200}\.json$/.test(key) || /^private\/favorites\/usr_[a-f0-9]{32}\/[a-f0-9]{64}\/\d{13}-[a-zA-Z0-9-]+\.json$/.test(key);
-const accountPrefixes = ['private/users/', 'private/usernames/', 'private/registrations/', 'private/password-changes/', 'private/password-heads/', 'private/account-migrations/', 'private/password-recovery-requests/', 'private/password-recovery-decisions/', 'private/password-recovery-limits/', 'private/deleted-users/', 'private/rate-limits/', 'private/audit-index/', 'private/audit-canonical/', 'private/audit-migration/'];
+const accountPrefixes = ['private/photo-leases/', 'private/users/', 'private/usernames/', 'private/registrations/', 'private/password-changes/', 'private/password-heads/', 'private/account-migrations/', 'private/password-recovery-requests/', 'private/password-recovery-decisions/', 'private/password-recovery-limits/', 'private/deleted-users/', 'private/rate-limits/', 'private/audit-index/', 'private/audit-canonical/', 'private/audit-migration/'];
 const probePrefix = 'private/registration-storage-check';
-const sqlOnly = key => /^private\/(rate-limits|audit-index|audit-canonical|audit-migration)\//.test(key);
+const sqlOnly = key => /^private\/(photo-leases|rate-limits|audit-index|audit-canonical|audit-migration)\//.test(key);
 const bindingKey = 'private/account-database-binding.json';
 const isAccountKey = key => accountPrefixes.some(prefix => key.startsWith(prefix)) || key.startsWith(probePrefix);
 const includesAccounts = prefix => isAccountKey(prefix) || accountPrefixes.some(path => path.startsWith(prefix)) || probePrefix.startsWith(prefix);
@@ -21,6 +23,7 @@ export function createAccountStore(source, { url, secretKey, namespace = 'fengwe
       if (binding) throw notConfigured();
     }
     return {
+      ...(source.photoLease ? { photoLease: command => source.photoLease(command) } : {}),
       async get(key, options) { if (isAccountKey(key)) await requireUnmigrated(); return source.get(key, options); },
       async list(options = {}) { if (includesAccounts(options.prefix || '')) await requireUnmigrated(); return source.list(options); },
       async set(key, value, options = {}) {
@@ -33,7 +36,7 @@ export function createAccountStore(source, { url, secretKey, namespace = 'fengwe
         if (isAccountKey(key)) await requireUnmigrated();
         return source.setJSON(key, value, options);
       },
-      async delete(key) { if (!isAuditObject(key) && !removableRecipeObject(key) && !/^photos\/[a-f0-9]{64}\.(txt|bin)$/.test(key)) throw unavailable('ACCOUNT_DATABASE_UNSUPPORTED_KEY'); return source.delete(key); },
+      async delete(key) { if (!isAuditObject(key) && !removablePhotoMetadata(key) && !removableRecipeObject(key) && !/^photos\/[a-f0-9]{64}\.(txt|bin)$/.test(key)) throw unavailable('ACCOUNT_DATABASE_UNSUPPORTED_KEY'); return source.delete(key); },
     };
   }
   return new SupabaseAccountStore(source, { url, secretKey, namespace, send });
@@ -91,6 +94,19 @@ class SupabaseAccountStore {
     if (rows.length > 1 || (rows.length && rows[0].key !== key)) throw unavailable('ACCOUNT_DATABASE_UNAVAILABLE');
     return rows[0] || null;
   }
+  async photoLease(command) {
+    const key = 'private/photo-leases/v1.json';
+    for (let attempt = 0; attempt < 12; attempt++) {
+      const previous = await this.readRecord(key), value = photoLeaseState(previous?.value, command);
+      if (!previous) { if (await this.writeRecord(key, value, true)) return value; }
+      else {
+        if (typeof previous.value?.version !== 'string') throw photoBusy();
+        const rows = await this.request('PATCH', [['namespace', `eq.${this.namespace}`], ['key', `eq.${key}`], ['value->>version', `eq.${previous.value.version}`], ['select', 'namespace,key,value']], { value }, 'return=representation');
+        if (rows.length === 1 && rows[0].value.version === value.version) return value;
+      }
+    }
+    throw photoBusy();
+  }
   async consumeRateLimit(key, { limit, windowMs, now }) {
     if (!key.startsWith('private/rate-limits/')) throw unavailable('ACCOUNT_DATABASE_UNSUPPORTED_KEY');
     for (let attempt = 0; attempt < 40; attempt++) {
@@ -123,7 +139,7 @@ class SupabaseAccountStore {
     if (this.source.delete) await this.source.delete(key);
   }
   async delete(key) {
-    if (!isAuditObject(key) && !removableRecipeObject(key) && !/^photos\/[a-f0-9]{64}\.(txt|bin)$/.test(key)) throw unavailable('ACCOUNT_DATABASE_UNSUPPORTED_KEY');
+    if (!isAuditObject(key) && !removablePhotoMetadata(key) && !removableRecipeObject(key) && !/^photos\/[a-f0-9]{64}\.(txt|bin)$/.test(key)) throw unavailable('ACCOUNT_DATABASE_UNSUPPORTED_KEY');
     if (isAccountKey(key)) await this.request('DELETE', [['namespace', `eq.${this.namespace}`], ['key', `eq.${key}`], ['select', 'namespace,key,value']], undefined, 'return=representation');
     await this.source.delete(key);
   }

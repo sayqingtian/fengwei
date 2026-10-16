@@ -1,7 +1,7 @@
 import { AsyncLocalStorage } from 'node:async_hooks';
 import { indexAudit } from './audit-index.mjs';
 
-const immutable = key => /^recipes\/[a-f0-9]{64}\/\d{12}-\d{13}-[a-zA-Z0-9-]+\.json$/.test(key) || /^photos\/[a-f0-9]{64}\.(?:txt|bin)$/.test(key) || /^private\/auth\/[a-f0-9]{64}\/\d{13}-[a-f0-9-]{36}\.json$/.test(key) || /^private\/permissions\/usr_[a-f0-9]{32}\/\d{12}-\d{13}-[a-zA-Z0-9-]+\.json$/.test(key) || /^private\/favorites\/usr_[a-f0-9]{32}\/[a-f0-9]{64}\/\d{13}-[a-zA-Z0-9-]+\.json$/.test(key);
+const immutable = key => /^recipes\/[a-f0-9]{64}\/\d{12}-\d{13}-[a-zA-Z0-9-]+\.json$/.test(key) || /^private\/auth\/[a-f0-9]{64}\/\d{13}-[a-f0-9-]{36}\.json$/.test(key) || /^private\/permissions\/usr_[a-f0-9]{32}\/\d{12}-\d{13}-[a-zA-Z0-9-]+\.json$/.test(key) || /^private\/favorites\/usr_[a-f0-9]{32}\/[a-f0-9]{64}\/\d{13}-[a-zA-Z0-9-]+\.json$/.test(key);
 
 export function requestStore(source) {
   const context = new AsyncLocalStorage(), retained = new Map();
@@ -69,6 +69,7 @@ export function requestStore(source) {
     async setJSON(key, value, options) { invalidate(); evict(key); const result = await source.setJSON(key, value, options); invalidate(); await indexReceipt(key, value); return result; },
     async delete(key) { invalidate(); const result = await source.delete(key); invalidate(); for (const [cacheKey, item] of retained) if (JSON.parse(cacheKey)[0] === key) { bytes -= item.size; retained.delete(cacheKey); } return result; },
   };
+  if (source.photoLease) store.photoLease = command => source.photoLease(command);
   if (source.checkAuditDelete) store.checkAuditDelete = () => source.checkAuditDelete();
   if (source.pruneAuditRecord) store.pruneAuditRecord = async (key, cutoff) => { invalidate(); evict(key); try { return await source.pruneAuditRecord(key, cutoff); } finally { invalidate(); evict(key); } };
   if (source.accountSnapshot) store.accountSnapshot = id => memo('accounts', id, () => source.accountSnapshot(id));

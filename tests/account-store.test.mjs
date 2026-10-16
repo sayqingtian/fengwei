@@ -390,3 +390,18 @@ test('complete backup moves SQL accounts and Blob data into an independent empty
   assert.equal(binding.namespace, target.namespace);
   assert.ok(![...target.source.records.keys()].some(key => key.startsWith('private/users/')));
 });
+
+test('SQL compare-and-swap coordinates photo leases across independent cloud instances', async () => {
+  const f = fixture(), a = f.store(), b = f.store();
+  const attempts = await Promise.allSettled([a, b].map((store, i) => store.photoLease({ action: 'acquire', mode: 'write', token: String(i) })));
+  assert.equal(attempts.filter(item => item.status === 'fulfilled').length, 1);
+  const winner = String(attempts.findIndex(item => item.status === 'fulfilled'));
+  await assert.rejects(b.photoLease({ action: 'acquire', mode: 'read', token: 'reader' }), { code: 'PHOTO_STORAGE_BUSY' });
+  await a.photoLease({ action: 'release', mode: 'write', token: winner });
+  const readers = await Promise.all([a, b].map((store, i) => store.photoLease({ action: 'acquire', mode: 'read', token: `r${i}` })));
+  assert.notEqual(readers[0].generation, readers[1].generation);
+  await assert.rejects(a.photoLease({ action: 'acquire', mode: 'write', token: 'collect' }), { code: 'PHOTO_STORAGE_BUSY' });
+  await Promise.all([a, b].map((store, i) => store.photoLease({ action: 'release', mode: 'read', token: `r${i}` })));
+  assert.ok((await b.photoLease({ action: 'acquire', mode: 'write', token: 'collect' })).writer);
+  assert.ok(![...f.source.records.keys()].some(key => key.includes('photo-leases')));
+});

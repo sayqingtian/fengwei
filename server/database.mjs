@@ -1,4 +1,5 @@
 import { createHash, randomUUID } from 'node:crypto';
+import { photoAccess } from './photo-access.mjs';
 import { Photos } from './photos.mjs';
 import { joinPhoto } from '../dist/photo-wire.js';
 
@@ -51,7 +52,8 @@ export class RecipeDatabase {
     const image = await this.photos.get(key);
     return image ? joinPhoto(image) : null;
   }
-  async commit({ id, recipe = null, baseRevision, mutationId, auditEntry, photoHash: reusedPhotoHash = '' }) {
+  commit(input) { return photoAccess(this.store, 'read', guard => this.commitLocked(input, guard)); }
+  async commitLocked({ id, recipe = null, baseRevision, mutationId, auditEntry, photoHash: reusedPhotoHash = '' }, guard) {
     if (await this.read(purgeKey(id))) throw purgedError();
     if (baseRevision !== null && (typeof baseRevision !== 'string' || !baseRevision.startsWith(`recipes/${hash(id)}/`) || !eventPattern.test(baseRevision))) throw new ConflictError();
     const digest = hash(JSON.stringify({ id, recipe, baseRevision, ...(reusedPhotoHash ? { photoHash: reusedPhotoHash } : {}) }));
@@ -78,7 +80,9 @@ export class RecipeDatabase {
       ...(auditEntry ? { auditEntry } : {}),
       recipe: recipe ? { ...recipe, photo: '', createdAt: current?.recipe?.createdAt || recipe.createdAt, updatedAt: new Date().toISOString() } : null,
     };
+    await guard();
     await this.store.setJSON(revision, event, { cacheControl: 'no-store' });
+    try { await guard(); } catch (error) { await this.store.delete(revision); throw error; }
     // A purge marker wins over an already-running restore. Recheck after the
     // immutable write (which also invalidates the per-request read cache).
     if (await this.read(purgeKey(id))) { await this.store.delete(revision); throw purgedError(); }
@@ -108,7 +112,8 @@ export class RecipeDatabase {
     }
     return { items, cursor: page.cursor };
   }
-  async purge(id, baseRevision, auditEntry) {
+  purge(id, baseRevision, auditEntry) { return photoAccess(this.store, 'write', guard => this.purgeLocked(id, baseRevision, auditEntry, guard)); }
+  async purgeLocked(id, baseRevision, auditEntry, guard) {
     const key = purgeKey(id);
     let marker = await this.read(key);
     if (!marker) {
@@ -127,11 +132,22 @@ export class RecipeDatabase {
     ]);
     const keys = [...versions.blobs.map(item => item.key).filter(key => eventPattern.test(key)), ...favorites.blobs.map(item => item.key).filter(key => new RegExp(`^private/favorites/usr_[a-f0-9]{32}/${hash(id)}/[0-9]{13}-[a-zA-Z0-9-]+\\.json$`).test(key))];
     const batch = keys.slice(0, 64);
+    const photos = await Promise.all(batch.filter(path => eventPattern.test(path)).map(path => this.read(path)));
+    marker.photoCandidates = [...new Set([...(marker.photoCandidates || []), ...photos.map(item => item?.photoHash).filter(Boolean)])];
+    // Persist candidates BEFORE removing their only history references.
+    await this.store.setJSON(key, marker, { cacheControl: 'no-store' });
     for (let index = 0; index < batch.length; index += 8) {
+      await guard();
       const results = await Promise.allSettled(batch.slice(index, index + 8).map(path => this.store.delete(path)));
       if (results.some(result => result.status === 'rejected')) throw Object.assign(new Error('部分历史记录尚未清理，请在回收站继续彻底删除。'), { status: 503, code: 'PURGE_INCOMPLETE' });
     }
-    const complete = keys.length <= batch.length;
+    let complete = keys.length <= batch.length;
+    if (complete && marker.photoCandidates.length) {
+      complete = await this.photos.prune(marker.photoCandidates, async (candidates, scan = null) => {
+        marker.photoCandidates = candidates; marker.photoScan = scan;
+        await this.store.setJSON(key, marker, { cacheControl: 'no-store' });
+      }, marker.photoScan, guard);
+    }
     if (complete && !marker.complete) await this.store.setJSON(key, { ...marker, title: '', complete: true }, { cacheControl: 'no-store' });
     return { complete, auditEntry: marker.auditEntry };
   }

@@ -1,11 +1,14 @@
 import { mkdir, readFile, writeFile, readdir, link, unlink, rename } from 'node:fs/promises';
 import { randomUUID } from 'node:crypto';
 import { dirname, resolve, sep } from 'node:path';
+import { photoLeaseState } from './photo-access.mjs';
 import { AUDIT_PREFIX, auditMatches } from './audit-index.mjs';
+const photoLeases = new Map();
 
 // Local development only. The cloud deployment uses EdgeOne Blob instead.
 export class FileStore {
   constructor(root) { this.root = resolve(root); }
+  async photoLease(command) { const state = photoLeaseState(photoLeases.get(this.root), command); photoLeases.set(this.root, state); return state; }
   path(key) { const path = resolve(this.root, key); if (!path.startsWith(this.root + sep)) throw new Error('Invalid storage key'); return path; }
   async set(key, value, options = {}) {
     const path = this.path(key); await mkdir(dirname(path), { recursive: true });

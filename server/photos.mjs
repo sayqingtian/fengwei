@@ -1,4 +1,5 @@
 import { createHash, randomUUID } from 'node:crypto';
+import { photoAccess } from './photo-access.mjs';
 import { PHOTO_TYPES, splitPhoto, joinPhoto } from '../dist/photo-wire.js';
 const digest = photo => createHash('sha256').update(photo).digest('hex');
 const validHash = key => /^[a-f0-9]{64}$/.test(key);
@@ -35,6 +36,58 @@ export class Photos {
     }
     return key;
   }
+  async prune(candidates, remember, checkpoint, guard) {
+    const scan = checkpoint?.generation === guard.generation ? checkpoint : { generation: guard.generation, phase: 'recipes/', cursor: '', used: [], aliases: [] };
+    const used = new Set(scan.used), aliases = new Map(scan.aliases), started = Date.now();
+    let processed = 0;
+    // Resume bounded reference scans across requests. Any intervening upload or
+    // optimization changes the lease generation and restarts the scan safely.
+    while (scan.phase) {
+      const { blobs } = await this.store.list({ prefix: scan.phase, consistency: 'strong' });
+      const keys = blobs.map(item => item.key).filter(key => key > scan.cursor).sort();
+      for (let offset = 0; offset < keys.length; offset += 16) {
+        if (processed >= 128 || Date.now() - started > 6000) {
+          await remember(candidates, { ...scan, used: [...used], aliases: [...aliases] }); return false;
+        }
+        await guard();
+        const group = keys.slice(offset, offset + 16);
+        await Promise.all(group.map(async key => {
+          if (scan.phase === 'recipes/' && !/^recipes\/[a-f0-9]{64}\/\d{12}-\d{13}-[a-zA-Z0-9-]+\.json$/.test(key)) return;
+          const value = await this.store.get(key, { type: 'json', consistency: 'strong' });
+          if (!value) throw new Error('References changed; collection stopped');
+          if (scan.phase === 'recipes/') {
+            if (value.photoHash) { if (!validHash(value.photoHash)) throw new Error('Invalid photo reference'); used.add(value.photoHash); }
+          } else {
+            const source = /^private\/photo-optimizations\/([a-f0-9]{64})\.json$/.exec(key)?.[1];
+            if (!source || !validHash(value.targetHash)) throw new Error('Invalid photo mapping; collection stopped');
+            aliases.set(source, value.targetHash);
+          }
+        }));
+        processed += group.length; scan.cursor = group.at(-1);
+      }
+      scan.phase = scan.phase === 'recipes/' ? 'private/photo-optimizations/' : null; scan.cursor = '';
+    }
+    // Protect full histories, including soft-deleted recipes and alias chains.
+    for (const key of used) { const target = aliases.get(key); if (target) used.add(target); }
+    const connected = new Set(candidates.filter(validHash));
+    let changed;
+    do { changed = false; for (const [source, target] of aliases) if (connected.has(source) || connected.has(target)) {
+      if (!connected.has(source)) { connected.add(source); changed = true; }
+      if (!connected.has(target)) { connected.add(target); changed = true; }
+    } } while (changed);
+    const unused = [...connected].filter(key => !used.has(key));
+    await remember(unused); // Save expanded candidates before deleting aliases.
+    const removed = new Set();
+    for (const key of unused.slice(0, 8)) {
+      await guard();
+      await this.store.delete(aliasKey(key));
+      await this.store.delete(`private/photo-optimized/${key}.json`);
+      await this.store.delete(`photos/${key}.bin`);
+      await this.store.delete(`photos/${key}.txt`);
+      removed.add(key); await remember(unused.filter(item => !removed.has(item)));
+    }
+    return unused.length <= 8;
+  }
   async inventory(cursor = '') {
     const { blobs } = await this.store.list({ prefix: 'photos/', consistency: 'strong' });
     const keys = [...new Set(blobs.map(({ key }) => /^photos\/([a-f0-9]{64})\.(?:txt|bin)$/.exec(key)?.[1]).filter(Boolean))].sort();
@@ -48,8 +101,10 @@ export class Photos {
     }));
     return { items: items.filter(Boolean), total: keys.length, cursor: pending.length > chosen.length ? chosen.at(-1) : null };
   }
-  async optimize(key, photo, auditEntry) {
+  optimize(key, photo, auditEntry) { return photoAccess(this.store, 'read', guard => this.optimizeLocked(key, photo, auditEntry, guard)); }
+  async optimizeLocked(key, photo, auditEntry, guard) {
     if (!validHash(key)) throw Object.assign(new Error('照片编号不正确。'), { status: 400 });
+    await guard();
     const previous = await this.store.get(aliasKey(key), { type: 'json', consistency: 'strong' });
     if (previous) {
       const image = await this.get(key);
@@ -75,10 +130,12 @@ export class Photos {
     if (!confirmed || confirmed.type !== selected.type || !Buffer.from(confirmed.bytes).equals(Buffer.from(selected.bytes))) throw new Error('Photo verification failed');
     const addedBytes = !alreadyStored || alreadyStored.legacy ? confirmed.storedBytes : 0;
     const receipt = { sourceHash: key, targetHash, originalBytes, bytes: confirmed.storedBytes, savedBytes: Math.max(0, originalBytes - addedBytes), version: 1, optimizedAt: new Date().toISOString(), auditEntry };
+    await guard();
     await this.store.setJSON(aliasKey(key), receipt, { cacheControl: 'no-store' });
     const saved = await this.store.get(aliasKey(key), { type: 'json', consistency: 'strong' });
     if (saved?.targetHash !== targetHash) throw new Error('Photo reference verification failed');
     await this.store.setJSON(`private/photo-optimized/${targetHash}.json`, { version: 1 }, { cacheControl: 'no-store' });
+    await guard();
     // All current and historical recipe references resolve through this durable map.
     // An interrupted cleanup is safe to retry; no recipe/history event is rewritten.
     await this.store.delete(`photos/${key}.txt`);

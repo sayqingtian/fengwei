@@ -178,14 +178,19 @@ test('interrupted purge stays retryable in trash; marker is included in migratio
   assert.equal((await f.raw.get(key, { type: 'json' })).complete, true);
 });
 
-test('purge bounds batches and a restore already in flight cannot resurrect removed content', async t => {
+test('purge bounds batches and coordinates with an in-flight restore before deleting content', async t => {
   const f = await fixture(t), input = recipe(), create = await f.database.commit({ id: input.id, recipe: input, baseRevision: null, mutationId: randomUUID() });
   const deleted = await f.database.commit({ id: input.id, baseRevision: create.revision, mutationId: randomUUID() });
   const originalSet = f.raw.setJSON.bind(f.raw), hold = gate(), entered = gate(); let pause = true;
   f.raw.setJSON = async (key, value, options) => { if (pause && key.startsWith('recipes/') && value.recipe) { entered.release(); await hold.promise; } return originalSet(key, value, options); };
   const restoring = f.database.commit({ id: input.id, recipe: input, baseRevision: deleted.revision, mutationId: randomUUID() });
-  await entered.promise; await f.database.purge(input.id, deleted.revision); pause = false; hold.release();
-  await assert.rejects(restoring, { code: 'RECIPE_PURGED' }); assert.equal(await f.database.latest(input.id), null);
+  await entered.promise;
+  try { await assert.rejects(f.database.purge(input.id, deleted.revision), { code: 'PHOTO_STORAGE_BUSY' }); }
+  finally { pause = false; hold.release(); }
+  const restored = await restoring;
+  await assert.rejects(f.database.purge(input.id, deleted.revision), { code: 'CONFLICT' });
+  const removed = await f.database.commit({ id: input.id, baseRevision: restored.revision, mutationId: randomUUID() });
+  await f.database.purge(input.id, removed.revision); assert.equal(await f.database.latest(input.id), null);
   assert.equal((await f.raw.list({ prefix: `recipes/${hash(input.id)}/` })).blobs.length, 0);
   const second = recipe('many-versions'); let event;
   for (let i = 0; i < 67; i++) event = await f.database.commit({ id: second.id, recipe: i ? null : second, baseRevision: event?.revision || null, mutationId: randomUUID() });
