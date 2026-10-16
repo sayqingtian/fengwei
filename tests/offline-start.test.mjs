@@ -8,7 +8,7 @@ function worker(cached, fetch) {
   const handlers = {};
   const context = {
     self: { location: new URL('https://example.test/recipes/sw.js'), addEventListener: (type, handler) => { handlers[type] = handler; }, skipWaiting: async () => {}, clients: { claim: async () => {} } },
-    caches: { match: async () => cached }, fetch, URL, Response,
+    caches: { open: async () => ({ match: async () => cached }) }, fetch, URL, Response,
   };
   vm.runInNewContext(source, context);
   return request => { let response; handlers.fetch({ request, respondWith: value => { response = Promise.resolve(value); } }); return response; };

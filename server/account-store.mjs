@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto';
 
-const accountPrefixes = ['private/users/', 'private/usernames/', 'private/registrations/', 'private/password-changes/', 'private/password-heads/', 'private/account-migrations/', 'private/password-recovery-requests/', 'private/password-recovery-decisions/', 'private/password-recovery-limits/'];
+const accountPrefixes = ['private/users/', 'private/usernames/', 'private/registrations/', 'private/password-changes/', 'private/password-heads/', 'private/account-migrations/', 'private/password-recovery-requests/', 'private/password-recovery-decisions/', 'private/password-recovery-limits/', 'private/cooking-checkins/'];
 const probePrefix = 'private/registration-storage-check';
 const bindingKey = 'private/account-database-binding.json';
 const isAccountKey = key => accountPrefixes.some(prefix => key.startsWith(prefix)) || key.startsWith(probePrefix);

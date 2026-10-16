@@ -105,6 +105,7 @@ export async function createRemoteStore(local) {
     if (!batchPhotos) return;
     const missing = [...new Set(items.filter(item => !item.deleted && item.photoHash && !photoCache.has(item.photoHash)).map(item => item.photoHash))];
     const groups = []; for (let i = 0; i < missing.length; i += 8) groups.push(missing.slice(i, i + 8));
+    globalThis.dispatchEvent?.(new CustomEvent('fengwei:sync-progress', { detail: { photos: missing.length } }));
     await parallel(groups, async hashes => {
       let pending = hashes;
       while (pending.length) {
@@ -204,6 +205,18 @@ export async function createRemoteStore(local) {
         // selections when importing generic recipes or another recipe backup.
         for (const recipe of favorites) if (recipe.favorite && !records.find(item => item.id === recipe.id)?.favorite) await setFavorite(recipe.id, true);
       } catch (error) { error.message = `已保存 ${completed} 道，剩余菜谱或收藏尚未导入。${error.message}`; throw error; }
+    },
+    async checkins(cursor = '') {
+      ensureOnline(); const epoch = accountEpoch;
+      const data = await request(`checkins${cursor ? `?cursor=${encodeURIComponent(cursor)}` : ''}`);
+      if (epoch !== accountEpoch) throw new ApiError('账号已切换，请重新加载打卡记录。', 409, 'ACCOUNT_CHANGED');
+      await sameAccount(data); return data;
+    },
+    async checkin(value) {
+      ensureOnline(); const epoch = accountEpoch;
+      const data = await request('checkins', { method: 'POST', value });
+      if (epoch !== accountEpoch) throw new ApiError('账号已切换，请重新加载打卡记录。', 409, 'ACCOUNT_CHANGED');
+      await sameAccount(data); return data.item;
     },
     async login(username, password) {
       const data = await request('login', { method: 'POST', value: { username, password } });

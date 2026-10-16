@@ -3,10 +3,12 @@ import { resolve, relative } from 'node:path';
 import { build } from 'esbuild';
 import { createHash } from 'node:crypto';
 import { makeZip } from './zip.mjs';
+import { stampVersion } from './app-version.mjs';
 
 const output = resolve('artifacts', 'fengwei-edgeone');
 await mkdir(output, { recursive: true });
 await cp('dist', output, { recursive: true });
+const version = await stampVersion(resolve('dist'), output);
 const functionFile = resolve(output, 'cloud-functions', 'api', '[[default]].js');
 await mkdir(resolve(output, 'cloud-functions', 'api'), { recursive: true });
 await build({ entryPoints: ['cloud-functions/api/[[default]].js'], outfile: functionFile, bundle: true, platform: 'node', format: 'esm', target: 'node20', minify: false });
@@ -37,5 +39,6 @@ await writeFile(resolve('artifacts', 'fengwei-edgeone-multiuser.zip'), currentZi
 await writeFile(resolve('artifacts', 'fengwei-edgeone-legacy.zip'), legacyZip);
 await writeFile(resolve('artifacts', 'fengwei-edgeone-multiuser-legacy.zip'), legacyZip);
 console.log(`Prepared EdgeOne upload folder: ${output}`);
+console.log(`Application version: ${version}`);
 console.log('Created fengwei-edgeone.zip and the legacy node-functions compatibility ZIP.');
 console.log('Backend and storage SDK are bundled; no platform npm install is required.');

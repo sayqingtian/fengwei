@@ -8,7 +8,7 @@ export const AUDIT_ACTIONS = {
   'recipes.sync': '同步菜谱', 'recipe.view': '查看菜谱', 'recipe.history': '查看历史版本',
   'recipe.create': '新增菜谱', 'recipe.update': '编辑菜谱', 'recipe.delete': '删除菜谱',
   'recipe.restore': '恢复历史版本', 'recipe.import': '导入菜谱', 'recipe.favorite': '收藏操作',
-  'recipe.cook': '开始跟着做', 'backup.export': '导出备份',
+  'recipe.cook': '开始跟着做', 'recipe.checkin': '制作完成打卡', 'backup.export': '导出备份',
   'permission.request': '申请编辑权限', 'permission.approve': '批准编辑权限',
   'permission.reject': '拒绝申请', 'permission.revoke': '撤销编辑权限',
 };
@@ -28,7 +28,7 @@ export class AuditLog {
   }
   async filtered({ query = '', result = '' } = {}) {
     const entries = new Map();
-    for (const prefix of ['private/audit/', 'recipes/', 'private/permissions/', 'private/permission-requests/', 'private/password-changes/', 'private/password-recovery-requests/']) {
+    for (const prefix of ['private/audit/', 'recipes/', 'private/permissions/', 'private/permission-requests/', 'private/password-changes/', 'private/password-recovery-requests/', 'private/cooking-checkins/']) {
       const { blobs } = await this.store.list({ prefix, consistency: 'strong' });
       const records = await Promise.all(blobs.map(({ key }) => this.store.get(key, { type: 'json', consistency: 'strong' })));
       for (const record of records) {

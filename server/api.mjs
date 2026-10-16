@@ -8,6 +8,7 @@ import { AuditLog } from './audit.mjs';
 import { makeAuditExport } from './audit-export.mjs';
 import { PasswordRecovery, RECOVERY_MESSAGE } from './password-recovery.mjs';
 import { requestStore } from './request-store.mjs';
+import { CookingCheckins } from './checkins.mjs';
 
 const failures = new Map();
 const registrations = new Map();
@@ -30,6 +31,7 @@ export function createApi({ database, password }) {
   const auth = password === undefined ? createAuth(database?.store) : createAuth(database?.store, testAccount(password));
   const favorites = new Favorites(database.store, auth.accounts.legacyId);
   const audit = new AuditLog(database.store), permissions = auth.permissions;
+  const checkins = new CookingCheckins(database.store);
   const passwordFailures = new Map();
   const recovery = new PasswordRecovery(auth.accounts, permissions.adminId), recoveryAttempts = new Map();
   return request => store.run(async () => {
@@ -114,6 +116,20 @@ export function createApi({ database, password }) {
         return reply({ ok: true }, 200, { 'Set-Cookie': sessionCookie(request, '', 0) });
       }
       if (route === 'me' && method === 'GET') return reply({ user });
+      if (route === 'checkins' && method === 'GET') return reply({ userId: user.id, ...await checkins.list(user.id, url.searchParams.get('cursor') || '') });
+      if (route === 'checkins' && method === 'POST') {
+        action = 'recipe.checkin';
+        const data = await body(request, 8192), value = checkins.validate(data);
+        if (data.expectedUserId !== user.id) fail(409, 'ACCOUNT_CHANGED', '账号已切换，请重新打开打卡窗口。');
+        operationId = value.id;
+        const previous = await checkins.previous(user.id, value);
+        if (previous) return reply({ userId: user.id, item: previous });
+        const recipe = await database.latest(value.recipeId);
+        if (!recipe || recipe.deleted) fail(404, 'NOT_FOUND', '这道菜谱已不存在，请同步菜谱。');
+        target = recipe.recipe.title;
+        const item = await checkins.add(user.id, value, target, receipt());
+        return reply({ userId: user.id, item }, 201);
+      }
       if (route === 'admin/password-recovery' && method === 'GET') {
         if (user.role !== 'admin') fail(403, 'ADMIN_REQUIRED', '只有管理员可以查看密码找回申请。');
         return reply({ userId: user.id, requests: await recovery.requests() });

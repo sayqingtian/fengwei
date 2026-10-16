@@ -74,6 +74,19 @@ function fixture() {
 }
 const cookieOf = response => response.headers.get('set-cookie')?.split(';')[0];
 
+test('cooking check-ins use the existing SQL table and reserve one record across independent cloud handlers', async () => {
+  const f = fixture(), first = f.store(), second = f.store();
+  const { CookingCheckins } = await import('../server/checkins.mjs');
+  const a = new CookingCheckins(first), b = new CookingCheckins(second), userId = `usr_${'c'.repeat(32)}`;
+  const value = { id: randomUUID(), recipeId: 'meal-1', note: '恰好熟了' };
+  const result = await Promise.all([a.add(userId, value, '一道菜'), b.add(userId, value, '一道菜')]);
+  assert.deepEqual(result[0], result[1]);
+  assert.equal((await a.list(userId)).total, 1);
+  assert.equal((await b.list(`usr_${'d'.repeat(32)}`)).total, 0);
+  assert.ok(![...f.source.records.keys()].some(key => key.startsWith('private/cooking-checkins/')));
+  assert.equal((await pg.query('select count(*)::int as count from fengwei_account_records where namespace = $1 and key like $2', [f.namespace, 'private/cooking-checkins/%'])).rows[0].count, 1);
+});
+
 test('warm authentication reads one fresh SQL credential snapshot per request and never caches password changes across handlers', async () => {
   const f = fixture(), first = f.api();
   const login = await f.call(first, 'login', 'POST', { username: 'wupanfeng', password: fixturePassword }), cookie = cookieOf(login);

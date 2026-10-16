@@ -64,6 +64,9 @@ try {
   await page.getByRole('button', { name: '下一步' }).click();
   await page.getByText('先炒鸡蛋，盛出。番茄炒出汁，加入鸡蛋炒匀。', { exact: true }).waitFor();
   await page.getByRole('button', { name: '做好了' }).click();
+  await page.getByRole('textbox', { name: '这次下厨的心得' }).fill('火候刚好，下次继续。');
+  await page.getByRole('button', { name: '提交打卡' }).click();
+  await page.getByRole('button', { name: '关闭菜谱' }).waitFor();
   await page.getByRole('button', { name: '关闭菜谱' }).click();
   await page.reload();
   await page.getByRole('button', { name: '查看 奶奶的番茄炒蛋' }).waitFor();
