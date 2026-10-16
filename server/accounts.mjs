@@ -35,6 +35,21 @@ export class Accounts {
   }
   key(id) { if (!isUserId(id)) throw new Error('Invalid account ID'); return `private/users/${id}.json`; }
   nameKey(name) { return `private/usernames/${hash(normalizeUsername(name))}.json`; }
+  deleted(id) { if (!isUserId(id)) return null; return this.store.get(`private/deleted-users/${id}.json`, { type: 'json', consistency: 'strong' }); }
+  async currentNameClaim(name) {
+    let key = this.nameKey(name);
+    const seen = new Set();
+    while (true) {
+      const claim = await this.store.get(key, { type: 'json', consistency: 'strong' });
+      if (!claim) return { key, claim: null };
+      if (!isUserId(claim.id) || seen.has(claim.id)) throw new Error('Invalid username claim');
+      if (!await this.deleted(claim.id)) return { key, claim };
+      seen.add(claim.id);
+      // Preserve prior reservations. All contenders use the same next key;
+      // no read/delete race can remove a replacement account's claim.
+      key = `${this.nameKey(name).slice(0, -5)}/after-${claim.id}.json`;
+    }
+  }
   passwordKey(id, version) {
     if (!isUserId(id) || (version !== 'initial' && !uuid(version))) throw new Error('Invalid password revision');
     return `private/password-changes/${id}/${version}.json`;
@@ -63,15 +78,18 @@ export class Accounts {
     if (!isUserId(id)) return null;
     const snapshot = this.store.accountSnapshot ? await this.store.accountSnapshot(id) : null;
     const read = key => snapshot ? snapshot.get(key) || null : this.store.get(key, { type: 'json', consistency: 'strong' });
+    if (await read(`private/deleted-users/${id}.json`)) return null;
     const stored = await read(this.key(id));
     if (stored) return this.withPassword(stored, snapshot);
     const pending = await read(`private/registrations/${id}.json`);
-    const claim = pending && await this.store.get(this.nameKey(pending.displayName), { type: 'json', consistency: 'strong' });
+    const claim = pending && (await this.currentNameClaim(pending.displayName)).claim;
     return claim?.id === id ? this.withPassword(pending, snapshot) : null;
   }
   async list() {
     const { blobs } = await this.store.list({ prefix: 'private/users/', consistency: 'strong' });
-    const users = (await Promise.all(blobs.map(({ key }) => this.store.get(key, { type: 'json', consistency: 'strong' })))).filter(Boolean);
+    const records = (await Promise.all(blobs.map(({ key }) => this.store.get(key, { type: 'json', consistency: 'strong' })))).filter(Boolean);
+    const users = [];
+    for (const user of records) if (isUserId(user.id) && !users.some(item => item.id === user.id) && !await this.deleted(user.id)) users.push(user);
     const { blobs: names } = await this.store.list({ prefix: 'private/usernames/', consistency: 'strong' });
     for (const { key } of names) {
       const claim = await this.store.get(key, { type: 'json', consistency: 'strong' });
@@ -80,8 +98,27 @@ export class Accounts {
     if (this.legacy && !users.some(user => user.id === this.legacyId)) users.push(await this.original(false));
     return users;
   }
+  async deletionTargets(data) {
+    if (!data || !uuid(data.mutationId) || !Array.isArray(data.accounts) || !data.accounts.length || data.accounts.length > 20 || new Set(data.accounts.map(item => item?.id)).size !== data.accounts.length) throw problem(400, 'INVALID_ACCOUNT_DELETION', '删除请求不完整，请刷新账号列表后重试。');
+    const targets = [];
+    for (const item of data.accounts) {
+      if (!isUserId(item?.id) || typeof item.displayName !== 'string') throw problem(400, 'INVALID_ACCOUNT_DELETION', '账号 ID 或用户名不正确。');
+      if (item.id === this.legacyId) throw problem(403, 'ADMIN_ACCOUNT_PROTECTED', '不能删除 wupanfeng 管理员账号。');
+      const deleted = await this.deleted(item.id);
+      const user = deleted || await this.get(item.id);
+      if (!user) throw problem(404, 'ACCOUNT_NOT_FOUND', '要删除的账号不存在，请刷新账号列表。');
+      if (normalizeUsername(user.displayName) !== normalizeUsername(item.displayName)) throw problem(409, 'ACCOUNT_DELETE_CONFLICT', '账号信息与当前列表不一致，请刷新后重试。');
+      targets.push({ id: item.id, displayName: user.displayName, alreadyDeleted: !!deleted });
+    }
+    return targets;
+  }
+  async deleteAccount(target, actor, mutationId, auditEntry) {
+    if (target.id === this.legacyId || !isUserId(target.id)) throw problem(403, 'ADMIN_ACCOUNT_PROTECTED', '不能删除管理员账号。');
+    if (!await this.deleted(target.id)) await this.store.setJSON(`private/deleted-users/${target.id}.json`, { id: target.id, displayName: target.displayName, deletedAt: new Date().toISOString(), deletedBy: actor.id, operationId: mutationId, auditEntry }, { cacheControl: 'no-store' });
+    if (!await this.deleted(target.id)) throw new Error('Account deletion was not persisted');
+  }
   async named(name) {
-    const claim = await this.store.get(this.nameKey(name), { type: 'json', consistency: 'strong' });
+    const claim = (await this.currentNameClaim(name)).claim;
     if (claim) {
       const user = await this.get(claim.id);
       return user && normalizeUsername(user.displayName) === normalizeUsername(name) ? [user] : [];
@@ -112,6 +149,7 @@ export class Accounts {
     const user = original ? await this.original(false) : isUserId(identifier) ? await this.get(identifier) : matches.length === 1 ? await this.get(matches[0].id) : null;
     // Use the same password derivation even for nonexistent IDs.
     const derived = await derive(password, user?.salt || this.legacy.salt);
+    if (matches.length > 1) throw problem(400, 'USERNAME_AMBIGUOUS', '这个旧用户名对应多个账号，请使用账号 ID 和原密码登录；管理员可在“我的 → 账号授权”查看账号 ID。');
     if (!user || !timingSafeEqual(derived, Buffer.from(user.passwordHash, 'hex'))) return null;
     if (original) await this.original();
     return user;
@@ -168,6 +206,7 @@ export class Accounts {
     // response lost in transit can be retried without creating another user.
     // Existing nonce-derived IDs and old sessions remain compatible.
     const id = `usr_${hash(`fengwei-registration-v1:${registrationId}`).slice(0, 32)}`;
+    if (await this.deleted(id)) throw problem(409, 'ACCOUNT_DELETED', '此注册请求对应的账号已删除，请重新打开注册页面。');
     const existing = await this.get(id);
     if (existing) {
       const derived = await derive(password, existing.salt);
@@ -185,7 +224,8 @@ export class Accounts {
     const user = await this.reserve(`private/registrations/${id}.json`, candidate);
     const derived = await derive(password, user.salt);
     if (normalizeUsername(user.displayName) !== name || !timingSafeEqual(derived, Buffer.from(user.passwordHash, 'hex'))) throw problem(409, 'REGISTRATION_CONFLICT', '此注册请求已使用，请重新打开注册页面。');
-    const claim = await this.reserve(this.nameKey(name), { id: user.id });
+    const nameClaim = await this.currentNameClaim(name);
+    const claim = await this.reserve(nameClaim.key, { id: user.id });
     if (claim?.id !== user.id) throw problem(409, 'USERNAME_TAKEN', '这个用户名已被注册，请使用其他用户名。');
     await this.store.setJSON(this.key(id), user, { cacheControl: 'no-store' });
     return user;

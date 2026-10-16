@@ -41,15 +41,20 @@ export function createAuth(store, account = DEFAULT_ACCOUNT) {
     permissions,
     get configured() { return !!account && /^[a-f0-9]{64}$/.test(account.passwordHash); },
     async check(username, password) { return !!await accounts.authenticate(username, password); },
-    async issue(userOrNow, suppliedNow) {
+    async issue(userOrNow, suppliedNow, previousSession) {
       const now = typeof userOrNow === 'number' ? userOrNow : suppliedNow ?? Date.now();
       const supplied = userOrNow && typeof userOrNow === 'object' ? userOrNow : null;
       const user = supplied ? supplied.passwordHash ? supplied : await accounts.get(supplied.id) : await accounts.original();
       const record = await signingKey(true);
-      const payload = Buffer.from(JSON.stringify({ version: 3, userId: user.id, credentialVersion: user.passwordVersion || 'initial', keyId: record.keyId, exp: Math.floor(now / 1000) + SESSION_SECONDS, nonce: randomBytes(16).toString('hex') })).toString('base64url');
+      const epoch = await store.get(`private/session-epochs/${user.id}.json`, { type: 'json', consistency: 'strong' });
+      const payload = Buffer.from(JSON.stringify({ version: 3, userId: user.id, credentialVersion: user.passwordVersion || 'initial', sessionEpoch: previousSession?.sessionEpoch || epoch?.id || 'initial', keyId: record.keyId, exp: Math.floor(now / 1000) + SESSION_SECONDS, nonce: previousSession?.nonce || randomBytes(16).toString('hex') })).toString('base64url');
       return `${payload}.${sign(payload, record.key)}`;
     },
-    async verify(request, now = Date.now()) {
+    async revoke(session, all = false) {
+      if (all) await store.setJSON(`private/session-epochs/${session.user.id}.json`, { id: randomUUID(), logoutNonce: hash(session.nonce), changedAt: new Date().toISOString() }, { cacheControl: 'no-store' });
+      else await store.setJSON(`private/session-revocations/${session.user.id}/${hash(session.nonce)}.json`, { revokedAt: new Date().toISOString() }, { cacheControl: 'no-store' });
+    },
+    async verify(request, now = Date.now(), { allowRevoked = false } = {}) {
       const value = request.headers.get('cookie')?.split(';').map(part => part.trim()).find(part => part.startsWith(`${COOKIE}=`))?.slice(COOKIE.length + 1);
       if (!value || value.length > 1024) return null;
       const parts = value.split('.');
@@ -69,7 +74,14 @@ export function createAuth(store, account = DEFAULT_ACCOUNT) {
       const user = payload.version === 2 ? await accounts.original() : await accounts.get(payload.userId);
       if (!user) return null;
       if ((payload.credentialVersion || 'initial') !== (user.passwordVersion || 'initial')) return null;
-      return { user: publicUser(await permissions.profile(user)), account: user, renew: payload.version === 2 || payload.exp - now / 1000 < RENEW_WITHIN_SECONDS };
+      const nonce = payload.version === 2 ? hash(parts[0]).slice(0, 32) : payload.nonce;
+      if (typeof nonce !== 'string' || !/^[a-f0-9]{32}$/.test(nonce)) return null;
+      const [epoch, revoked] = await Promise.all([
+        store.get(`private/session-epochs/${user.id}.json`, { type: 'json', consistency: 'strong' }),
+        store.get(`private/session-revocations/${user.id}/${hash(nonce)}.json`, { type: 'json', consistency: 'strong' }),
+      ]);
+      if (!allowRevoked && (revoked || (payload.sessionEpoch || 'initial') !== (epoch?.id || 'initial'))) return null;
+      return { user: publicUser(await permissions.profile(user)), account: user, nonce, allLogout: epoch?.logoutNonce === hash(nonce), sessionEpoch: payload.sessionEpoch || 'initial', renew: payload.version === 2 || payload.exp - now / 1000 < RENEW_WITHIN_SECONDS };
     },
   };
 }

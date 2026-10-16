@@ -18,7 +18,7 @@ const viewer = await handler(new Request(`${base}/api/register`, { method: 'POST
 assert.equal(viewer.status, 201);
 const dish = { id: 'feature-dish', title: '家常番茄炒蛋', description: '每次下厨都值得记录', category: '家常菜', notes: '', minutes: 15, servings: 2, photo: `data:image/png;base64,${(await readFile(resolve(root, 'icons/icon-192.png'))).toString('base64')}`, favorite: false, ingredients: [{ name: '番茄', amount: '2 个' }], steps: ['切好番茄，打散鸡蛋。', '炒熟后调味，盛盘。'], createdAt: new Date().toISOString(), updatedAt: new Date().toISOString() };
 await database.commit({ id: dish.id, recipe: dish, baseRevision: null, mutationId: randomUUID() });
-let legacy = true, release = '2026.10.16.1', failAsset = false, slow = false, failRecipes = false;
+let legacy = true, release = '3.1.4', failAsset = false, slow = false, failRecipes = false;
 const oldFiles = new Map();
 const types = { '.html': 'text/html; charset=utf-8', '.js': 'text/javascript; charset=utf-8', '.json': 'application/json', '.css': 'text/css', '.png': 'image/png', '.svg': 'image/svg+xml', '.webmanifest': 'application/manifest+json' };
 const server = createServer(async (req, res) => {
@@ -41,7 +41,7 @@ const server = createServer(async (req, res) => {
     } else {
       data = await readFile(path);
       if (relative === 'version.json') data = Buffer.from(JSON.stringify({ version: release }));
-      if (['sw.js', 'update.js'].includes(relative)) data = Buffer.from(data.toString().replaceAll("'2026.10.16.1'", `'${release}'`).replace("'fengwei-shell-v13'", `'fengwei-shell-test-${release}'`));
+      if (['sw.js', 'version.js'].includes(relative)) data = Buffer.from(data.toString().replaceAll("'3.1.4'", `'${release}'`).replace("'fengwei-shell-v27'", `'fengwei-shell-test-${release}'`));
     }
     res.writeHead(200, { 'Content-Type': types[extname(path)] || 'application/octet-stream', 'Cache-Control': 'no-store' }); res.end(data);
   } catch { res.writeHead(404); res.end('Not found'); }
@@ -138,20 +138,20 @@ try {
   await other.getByRole('button', { name: '我的打卡', exact: false }).click();
   await other.getByText('番茄多炒一会儿，酸甜刚好。', { exact: true }).waitFor(); await another.close();
 
-  await mobileMy().click(); release = '2026.10.16.2';
+  await mobileMy().click(); release = '3.1.5';
   await page.getByRole('button', { name: '检查更新', exact: true }).click();
   await page.getByRole('button', { name: '更新并重新打开', exact: true }).waitFor();
   await page.getByRole('button', { name: '更新并重新打开', exact: true }).click();
   await page.waitForEvent('load'); await page.getByRole('button', { name: `查看 ${dish.title}`, exact: true }).waitFor();
-  await mobileMy().click(); await page.getByText('当前版本 2026.10.16.2', { exact: true }).waitFor();
+  await mobileMy().click(); await page.getByText('当前版本 3.1.5', { exact: true }).waitFor();
   await page.getByRole('button', { name: '我的打卡', exact: false }).click();
   await page.getByText('番茄多炒一会儿，酸甜刚好。', { exact: true }).waitFor();
   // A partial download cannot replace the working offline shell.
-  await mobileMy().click(); release = '2026.10.16.3'; failAsset = true;
+  await mobileMy().click(); release = '3.1.6'; failAsset = true;
   await page.getByRole('button', { name: '检查更新', exact: true }).click();
   await page.getByRole('button', { name: '更新并重新打开', exact: true }).click();
   await page.locator('.version-status').filter({ hasText: /仍在发布|未完成/ }).waitFor();
-  assert.equal(await page.getByText('当前版本 2026.10.16.2', { exact: true }).count(), 1);
+  assert.equal(await page.getByText('当前版本 3.1.5', { exact: true }).count(), 1);
   await context.setOffline(true); await page.reload();
   await page.getByRole('button', { name: `查看 ${dish.title}`, exact: true }).waitFor();
   await page.getByRole('button', { name: `查看 ${dish.title}`, exact: true }).click();

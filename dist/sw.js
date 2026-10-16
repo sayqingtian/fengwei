@@ -1,6 +1,6 @@
-const CACHE = 'fengwei-shell-v13';
-const VERSION = '2026.10.16.1';
-const ASSETS = ['./', './index.html', './styles.css', './app.js', './store.js', './sync.js', './my.js', './recovery.js', './update.js', './checkins.js', './manifest.webmanifest', './icons/icon.svg', './icons/icon-192.png', './icons/icon-512.png', './icons/apple-touch-icon.png'];
+const CACHE = 'fengwei-shell-v27';
+const VERSION = '3.1.4';
+const ASSETS = ['./', './index.html', './styles.css', './app.js', './navigation.js', './store.js', './sync.js', './outbox.js', './my.js', './recovery.js', './photo.js', './photo-wire.js', './photos-page.js', './backup.js', './full-backup.js', './drafts.js', './updates.js', './version.js', './manifest.webmanifest', './icons/icon.svg', './icons/icon-192.png', './icons/icon-512.png', './icons/apple-touch-icon.png', './update.js', './checkins.js'];
 self.addEventListener('install', event => {
   event.waitUntil((async () => {
     const legacy = (await caches.keys()).some(key => /^fengwei-shell-v(?:[1-9]|1[0-2])$/.test(key) || key.startsWith('shiwei-shell-'));
@@ -23,7 +23,7 @@ self.addEventListener('install', event => {
   })());
 });
 self.addEventListener('message', event => {
-  if (event.data?.type === 'SKIP_WAITING') event.waitUntil(self.skipWaiting());
+  if (['SKIP_WAITING', 'ACTIVATE_UPDATE'].includes(event.data?.type)) event.waitUntil(self.skipWaiting());
   if (event.data?.type === 'VERSION') event.ports[0]?.postMessage({ version: VERSION });
 });
 self.addEventListener('activate', event => {
@@ -34,6 +34,9 @@ self.addEventListener('fetch', event => {
   if (event.request.method !== 'GET' || url.origin !== self.location.origin) return;
   const relative = url.pathname.slice(new URL('./', self.location).pathname.length);
   if (relative.startsWith('api/')) return;
+  if (relative.startsWith('codecs/')) {
+    event.respondWith(caches.open(CACHE).then(async cache => { const saved = await cache.match(event.request); if (saved) return saved; const response = await fetch(event.request); if (response.ok) await cache.put(event.request, response.clone()); return response; })); return;
+  }
   if (event.request.mode !== 'navigate' && !ASSETS.some(asset => asset.slice(2) === relative)) return;
   if (event.request.mode === 'navigate') {
     // Open the cached interface immediately; private API responses are never cached.

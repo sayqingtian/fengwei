@@ -2,6 +2,9 @@ import { createRemoteStore } from './sync.js';
 export const CATEGORIES = ['家常菜', '下饭菜', '汤羹', '早餐', '烘焙', '甜点', '饮品', '其他'];
 export const BACKUP_FORMAT = 'fengwei-recipes';
 export const BACKUP_VERSION = 1;
+export const BACKUP_MAX_BYTES = 50 * 1024 * 1024;
+export const BACKUP_MAX_RECIPES = 10000;
+const utf8 = new TextEncoder();
 const MAX_TEXT = 12000;
 export const createId = () => {
   if (globalThis.crypto?.randomUUID) return crypto.randomUUID();
@@ -13,7 +16,7 @@ export const createId = () => {
   }
   return `recipe-${Date.now()}-${Math.random().toString(36).slice(2)}`;
 };
-export const isPhoto = value => typeof value === 'string' && /^data:image\/(jpeg|png|webp);base64,[A-Za-z0-9+/=\r\n]+$/.test(value) && value.length <= 8000000;
+export const isPhoto = value => typeof value === 'string' && /^data:image\/(jpeg|png|webp|avif);base64,[A-Za-z0-9+/=\r\n]+$/.test(value) && value.length <= 8000000;
 
 function string(value, label, max = MAX_TEXT) {
   if (typeof value !== 'string' || value.length > max) throw new Error(`${label}格式不正确或内容过长`);
@@ -52,17 +55,43 @@ export function validateRecipe(raw) {
 }
 
 export function parseBackup(text) {
+  if (typeof text !== 'string' || new Blob([text]).size > BACKUP_MAX_BYTES) throw new Error('单份备份不能超过 50 MiB，请选择分卷文件逐份导入');
   let data;
   try { data = JSON.parse(text); } catch { throw new Error('文件无法读取，请选择峰味或旧版拾味导出的 JSON 备份'); }
   if (![BACKUP_FORMAT, 'shiwei-recipes'].includes(data?.format) || data?.version !== BACKUP_VERSION || !Array.isArray(data.recipes)) throw new Error('这不是受支持的峰味备份文件');
-  if (data.recipes.length > 10000) throw new Error('单次最多导入 10000 道菜谱');
+  if (data.recipes.length > BACKUP_MAX_RECIPES) throw new Error('单份备份最多导入 10000 道菜谱');
   const recipes = data.recipes.map(validateRecipe);
   if (new Set(recipes.map(item => item.id)).size !== recipes.length) throw new Error('备份中包含重复编号，请检查文件');
   return recipes;
 }
 
 export function makeBackup(recipes) {
-  return JSON.stringify({ format: BACKUP_FORMAT, version: BACKUP_VERSION, exportedAt: new Date().toISOString(), recipes: recipes.map(validateRecipe) }, null, 2);
+  const parts = makeBackupParts(recipes);
+  if (parts.length !== 1) throw new Error('备份超过单份限制，请使用分卷导出');
+  return parts[0].text;
+}
+
+// Count UTF-8 bytes including JSON punctuation. Each part is an ordinary v1
+// backup, so it can be restored independently by the existing merge importer.
+export function makeBackupParts(recipes, { exportedAt = new Date().toISOString(), maxBytes = BACKUP_MAX_BYTES, maxRecipes = BACKUP_MAX_RECIPES } = {}) {
+  if (!Number.isSafeInteger(maxBytes) || maxBytes < 1 || maxBytes > BACKUP_MAX_BYTES || !Number.isSafeInteger(maxRecipes) || maxRecipes < 1 || maxRecipes > BACKUP_MAX_RECIPES) throw new Error('备份分卷限制不正确');
+  if (typeof exportedAt !== 'string' || !Number.isFinite(Date.parse(exportedAt))) throw new Error('备份时间不正确');
+  const header = JSON.stringify({ format: BACKUP_FORMAT, version: BACKUP_VERSION, exportedAt }).slice(0, -1) + ',"recipes":[';
+  const footer = ']}', overhead = utf8.encode(header + footer).length;
+  if (overhead > maxBytes) throw new Error('备份分卷大小不足');
+  const parts = [], ids = new Set(); let entries = [], size = overhead;
+  const flush = () => { parts.push({ text: header + entries.join(',') + footer, bytes: size, count: entries.length }); entries = []; size = overhead; };
+  for (const raw of recipes) {
+    const item = validateRecipe(raw);
+    if (ids.has(item.id)) throw new Error('备份中包含重复编号，请检查数据');
+    ids.add(item.id);
+    const text = JSON.stringify(item), bytes = utf8.encode(text).length;
+    if (overhead + bytes > maxBytes) throw new Error(`“${item.title}”超过单份备份大小，请缩小内容后重试`);
+    if (entries.length && (entries.length >= maxRecipes || size + 1 + bytes > maxBytes)) flush();
+    size += bytes + (entries.length ? 1 : 0); entries.push(text);
+  }
+  if (entries.length || !parts.length) flush();
+  return parts;
 }
 
 export function planImport(current, incoming) {
@@ -117,7 +146,14 @@ export async function openLocalStore() {
     remove: id => operation('recipes', 'readwrite', store => store.delete(id)),
     import: recipes => { const valid = recipes.map(validateRecipe); return operation('recipes', 'readwrite', store => valid.forEach(item => store.put(item))); },
     setting: key => operation('settings', 'readonly', (store, set) => { const req = store.get(key); req.onsuccess = () => set(req.result); }),
-    setSetting: (key, value) => operation('settings', 'readwrite', store => store.put(value, key))
+    setSetting: (key, value) => operation('settings', 'readwrite', store => store.put(value, key)),
+    updateSetting: (key, update) => operation('settings', 'readwrite', (store, set) => {
+      const request = store.get(key);
+      request.onsuccess = () => {
+        try { const value = update(request.result); store.put(value, key); set(value); }
+        catch { store.transaction.abort(); }
+      };
+    })
   };
 }
 

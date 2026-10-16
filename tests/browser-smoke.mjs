@@ -22,6 +22,7 @@ const playwright = await import(process.env.RECIPE_PLAYWRIGHT ? pathToFileURL(pr
 const browser = await playwright.chromium.launch({ headless: true, ...(process.env.RECIPE_BROWSER ? { executablePath: process.env.RECIPE_BROWSER } : {}) });
 const context = await browser.newContext({ viewport: { width: 390, height: 844 }, isMobile: true, hasTouch: true, deviceScaleFactor: 1 });
 const page = await context.newPage();
+page.setDefaultTimeout(10000);
 const errors = []; page.on('pageerror', error => errors.push(error.message));
 const externalRequests = []; page.on('request', request => { if (/^https?:/.test(request.url()) && !request.url().startsWith('http://localhost:4182')) externalRequests.push(request.url()); });
 const output = resolve('artifacts'); await mkdir(output, { recursive: true });
@@ -57,8 +58,9 @@ try {
   await page.getByRole('dialog').getByRole('heading', { name: '奶奶的番茄炒蛋' }).waitFor();
   assert.equal(await page.getByText('最后加盐，记得小火。', { exact: true }).count(), 1);
 
-  await page.getByRole('button', { name: '收藏', exact: true }).click();
-  await page.getByRole('button', { name: '取消收藏', exact: true }).waitFor();
+  await page.getByRole('dialog').getByRole('button', { name: /^收藏/ }).click();
+  await page.getByRole('dialog').getByRole('button', { name: /^取消收藏/ }).waitFor();
+  await page.getByText('已同步到服务器', { exact: true }).waitFor();
   await page.getByRole('button', { name: '跟着做' }).click();
   await page.getByText('番茄切块，鸡蛋打散。', { exact: true }).waitFor();
   await page.getByRole('button', { name: '下一步' }).click();
@@ -88,13 +90,14 @@ try {
   await page.getByRole('navigation', { name: '底部导航' }).getByRole('button', { name: '我的', exact: true }).click();
   await page.getByRole('button', { name: '菜谱备份' }).click();
   await page.getByRole('heading', { name: '离线页面已准备好' }).waitFor();
+  await page.getByRole('button', { name: '同步并生成备份', exact: true }).click();
   const downloadPromise = page.waitForEvent('download');
   await page.getByRole('button', { name: '下载备份' }).click();
   const download = await downloadPromise; const exportPath = resolve(output, 'roundtrip.json'); await download.saveAs(exportPath);
   exported = (await import('node:fs/promises')).readFile(exportPath, 'utf8');
   const backup = JSON.parse(await exported);
   assert.equal(backup.recipes.length, 1);
-  assert.match(backup.recipes[0].photo, /^data:image\/jpeg;base64,/);
+  assert.match(backup.recipes[0].photo, /^data:image\/(jpeg|avif);base64,/);
   assert.equal(backup.recipes[0].favorite, true);
 
   await page.locator('#import-file').setInputFiles({ name: 'invalid.json', mimeType: 'application/json', buffer: Buffer.from('{bad json') });
@@ -110,7 +113,8 @@ try {
   await page.getByRole('button', { name: '取消', exact: true }).click();
   assert.equal(await page.getByRole('textbox', { name: '菜名' }).inputValue(), '尚未保存的更改');
   await page.getByRole('button', { name: '关闭编辑' }).click();
-  await page.getByRole('button', { name: '放弃修改' }).click();
+  await page.getByRole('button', { name: '保留并关闭' }).click();
+  await page.getByRole('button', { name: '关闭菜谱', exact: true }).click();
   assert.equal(await page.getByRole('button', { name: '查看 奶奶的番茄炒蛋（改良版）' }).count(), 1);
 
   await page.getByRole('button', { name: '查看 奶奶的番茄炒蛋（改良版）' }).click();
@@ -139,15 +143,15 @@ try {
   await page.getByRole('button', { name: '编辑', exact: true }).click();
   await page.getByRole('textbox', { name: '我的小心得' }).fill('这份过期的修改不能覆盖另一台设备');
   const remote = (await (await other.request.get('http://localhost:4182/api/recipes')).json()).items.find(item => !item.deleted);
-  const photo = (await (await other.request.get(`http://localhost:4182/api/photo/${remote.photoHash}`)).json()).photo;
-  const saved = await other.request.put(`http://localhost:4182/api/recipe/${remote.id}`, { data: { recipe: { ...remote.recipe, photo, notes: '另一台设备保存的小心得' }, baseRevision: remote.revision, mutationId: 'browser-other-device-save' } });
+  const saved = await other.request.put(`http://localhost:4182/api/recipe/${remote.id}`, { data: { recipe: { ...remote.recipe, photo: '', notes: '另一台设备保存的小心得' }, photoHash: remote.photoHash, baseRevision: remote.revision, mutationId: 'browser-other-device-save' } });
   assert.equal(saved.status(), 200);
   await page.getByRole('button', { name: '保存这道菜' }).click();
-  await page.getByRole('alert').filter({ hasText: '另一台设备更新' }).waitFor();
-  assert.equal(await page.getByRole('textbox', { name: '我的小心得' }).inputValue(), '这份过期的修改不能覆盖另一台设备');
-  await page.getByRole('button', { name: '关闭编辑' }).click();
-  await page.getByRole('button', { name: '放弃修改' }).click();
-  await page.getByRole('button', { name: '同步菜谱', exact: true }).click();
+  await page.getByText('同步未完成，修改保留在本机。', { exact: false }).waitFor();
+  await page.getByRole('button', { name: '关闭菜谱' }).click();
+  await page.getByRole('button', { name: '查看后台同步', exact: true }).first().click();
+  await page.getByRole('button', { name: '放弃本机修改', exact: true }).click();
+  await page.getByRole('alertdialog').getByRole('button', { name: '放弃修改', exact: true }).click();
+  await page.getByRole('navigation', { name: '底部导航' }).getByRole('button', { name: '菜谱本', exact: true }).click();
   await page.getByRole('button', { name: '查看 奶奶的番茄炒蛋（改良版）' }).click();
   await page.getByText('另一台设备保存的小心得', { exact: true }).waitFor();
   await page.getByRole('button', { name: '查看历史版本', exact: true }).click();
@@ -163,19 +167,19 @@ try {
   await page.getByRole('textbox', { name: '菜名' }).fill('离线记录的清汤面');
   await context.setOffline(true);
   await page.getByRole('button', { name: '保存这道菜' }).click();
-  await page.getByRole('alert').filter({ hasText: '离线预览' }).waitFor();
-  assert.equal(await page.getByRole('textbox', { name: '菜名' }).inputValue(), '离线记录的清汤面');
-  await page.getByRole('button', { name: '关闭编辑' }).click();
-  await page.getByRole('button', { name: '放弃修改' }).click();
+  await page.getByRole('dialog').getByRole('heading', { name: '离线记录的清汤面' }).waitFor();
+  await page.getByRole('button', { name: '关闭菜谱' }).click();
   await page.reload();
   await page.getByRole('button', { name: '查看 奶奶的番茄炒蛋（改良版）' }).waitFor();
   assert.equal(await page.getByRole('button', { name: '记一道新菜' }).count(), 0, 'offline preview cannot open a new editor');
   await page.getByRole('button', { name: '查看 奶奶的番茄炒蛋（改良版）' }).waitFor();
-  assert.equal(await page.locator('.recipe-card').count(), 1);
+  assert.equal(await page.locator('.recipe-card').count(), 2);
+  await page.getByRole('button', { name: '查看 离线记录的清汤面' }).waitFor();
   await page.screenshot({ path: resolve(output, 'mobile-recipes.png'), fullPage: true });
 
   await context.setOffline(false);
   await page.getByRole('button', { name: '同步菜谱', exact: true }).click();
+  await page.waitForFunction(() => !document.querySelector('.sync-loading'));
   await page.getByRole('button', { name: '记一道新菜' }).click();
   await page.getByRole('textbox', { name: '菜名' }).fill('服务器记录的清汤面');
   await page.getByRole('button', { name: '保存这道菜' }).click();
@@ -213,13 +217,15 @@ try {
   server = await startServer();
   const afterRestart = await other.request.get('http://localhost:4182/api/recipes');
   assert.equal(afterRestart.status(), 200);
-  assert.equal((await afterRestart.json()).items.filter(item => !item.deleted).length, 2);
+  assert.equal((await afterRestart.json()).items.filter(item => !item.deleted).length, 3);
   await page.getByRole('button', { name: '退出', exact: true }).click();
+  if (await page.getByRole('button', { name: '退出并清理', exact: true }).count()) await page.getByRole('button', { name: '退出并清理', exact: true }).click();
   await page.getByRole('button', { name: '打开菜谱本' }).waitFor();
   await context.setOffline(true); await page.reload();
   await page.getByRole('heading', { name: '菜谱本暂时打不开' }).waitFor();
   assert.equal(await page.locator('.recipe-card').count(), 0, 'logout clears cached private server recipes');
   await second.close();
-  await writeFile(resolve(output, 'verification.json'), JSON.stringify({ passed: true, viewport: '390x844 and 1280x950', checks: ['account/password login', 'persistent cookie resumes without login', 'authenticated server CRUD', 'photo compression and persistence', 'favorite and search', 'cook steps', 'backup export and import with photos', 'history restoration', 'two independent devices', 'stale editor rejection retains draft', 'offline read-only cache', 'offline write rejection', 'server restart persistence', 'cached shell startup', 'logout clears private cache', 'no external browser requests', 'no runtime errors'], limitation: 'Local persistence adapter verified; real EdgeOne deployment/storage requires upload to the owner project.' }, null, 2));
+  await writeFile(resolve(output, 'verification.json'), JSON.stringify({ passed: true, viewport: '390x844 and 1280x950', checks: ['account/password login', 'persistent cookie resumes without login', 'authenticated server CRUD', 'photo compression and persistence', 'favorite and search', 'cook steps', 'backup export and import with photos', 'history restoration', 'two independent devices', 'stale editor rejection retains draft', 'offline read-only cache', 'offline writes retained and resumed', 'server restart persistence', 'cached shell startup', 'logout clears private cache', 'no external browser requests', 'no runtime errors'], limitation: 'Local persistence adapter verified; real EdgeOne deployment/storage requires upload to the owner project.' }, null, 2));
   console.log('Browser smoke checks passed. Screenshots and verification are in artifacts/.');
-} finally { await browser.close(); server.kill(); }
+} catch (error) { await page.screenshot({ path: resolve(output, 'smoke-failure.png'), fullPage: true }); console.log((await page.locator('body').innerText()).slice(-2200)); throw error; }
+finally { await browser.close(); server.kill(); }

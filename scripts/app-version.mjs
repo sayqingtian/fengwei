@@ -15,8 +15,8 @@ export async function stampVersion(source, output) {
   }
   await walk(source);
   const current = JSON.parse(await readFile(resolve(source, 'version.json'), 'utf8')).version;
-  const version = `${current.split('.').slice(0, 3).join('.')}.${parseInt(digest.digest('hex').slice(0, 12), 16)}`;
-  for (const file of ['sw.js', 'update.js']) {
+  const version = `${current.split('+')[0]}+${parseInt(digest.digest('hex').slice(0, 12), 16)}`;
+  for (const file of ['sw.js', 'version.js']) {
     let text = await readFile(resolve(source, file), 'utf8');
     if (!text.includes(`'${current}'`)) throw new Error(`Version does not match in ${file}`);
     text = text.replace(`'${current}'`, `'${version}'`);

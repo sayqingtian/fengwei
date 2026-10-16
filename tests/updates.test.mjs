@@ -39,7 +39,7 @@ test('builds automatically stamp matching versions and changed source assets pro
   const source = join(directory, 'source'), output = join(directory, 'output'); await mkdir(output); await cp(resolve('dist'), source, { recursive: true });
   const first = await stampVersion(source, output), same = await stampVersion(source, output); assert.equal(first, same);
   assert.ok((await readFile(join(output, 'sw.js'), 'utf8')).includes(`fengwei-shell-${first}`));
-  assert.ok((await readFile(join(output, 'update.js'), 'utf8')).includes(`'${first}'`));
+  assert.ok((await readFile(join(output, 'version.js'), 'utf8')).includes(`'${first}'`));
   assert.equal(JSON.parse(await readFile(join(output, 'version.json'), 'utf8')).version, first);
   await writeFile(join(source, 'styles.css'), 'body{color:green}'); assert.notEqual(await stampVersion(source, output), first);
 });

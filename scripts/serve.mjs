@@ -19,14 +19,14 @@ const root = resolve(project, 'dist');
 const database = new RecipeDatabase(new FileStore(process.env.RECIPE_DATA_DIR || resolve(project, '.data', 'fengwei')));
 const handler = createApi({ database, ...(process.env.NODE_ENV === 'test' ? { password: process.env.FENGWEI_TEST_PASSWORD } : {}) });
 const port = Number(process.env.RECIPE_PORT || 4173);
-const types = { '.html': 'text/html; charset=utf-8', '.js': 'text/javascript; charset=utf-8', '.css': 'text/css; charset=utf-8', '.svg': 'image/svg+xml', '.png': 'image/png', '.webmanifest': 'application/manifest+json' };
+const types = { '.html': 'text/html; charset=utf-8', '.js': 'text/javascript; charset=utf-8', '.css': 'text/css; charset=utf-8', '.svg': 'image/svg+xml', '.png': 'image/png', '.avif': 'image/avif', '.webp': 'image/webp', '.wasm': 'application/wasm', '.webmanifest': 'application/manifest+json' };
 const host = process.env.RECIPE_HOST || '127.0.0.1';
 const server = createServer(async (req, res) => {
   try {
     const url = new URL(req.url, `http://${req.headers.host || 'localhost'}`);
     if (url.pathname.startsWith('/api/')) {
       const request = new Request(url, { method: req.method, headers: req.headers, ...(!['GET', 'HEAD'].includes(req.method) ? { body: Readable.toWeb(req), duplex: 'half' } : {}) });
-      const response = await handler(request);
+      const response = await handler(request, { clientIp: req.socket.remoteAddress || 'local' });
       res.writeHead(response.status, Object.fromEntries(response.headers));
       res.end(Buffer.from(await response.arrayBuffer())); return;
     }

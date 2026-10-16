@@ -1,4 +1,4 @@
-export const APP_VERSION = '2026.10.16.1';
+import { APP_VERSION } from './version.js';
 
 export function createUpdater({ changed = () => {}, reload = () => location.reload() } = {}) {
   let registration, starting, running, latest = '', status = '', busy = false, lastCheck = 0;
@@ -28,7 +28,7 @@ export function createUpdater({ changed = () => {}, reload = () => location.relo
         const response = await fetch(url, { cache: 'no-store', signal: AbortSignal.timeout(15000) });
         if (!response.ok) throw new Error('版本信息暂时不可用，请稍后重试。');
         const info = await response.json();
-        if (typeof info.version !== 'string' || !/^\d{4}\.\d{2}\.\d{2}\.\d+$/.test(info.version)) throw new Error('版本信息暂时不可用，请稍后重试。');
+        if (typeof info.version !== 'string' || !/^\d+\.\d+\.\d+(?:\+\d+)?$/.test(info.version)) throw new Error('版本信息暂时不可用，请稍后重试。');
         latest = info.version;
         const reg = await start(); if (reg) await reg.update();
         status = latest !== APP_VERSION || reg?.waiting ? '发现新版本，可以更新。' : '当前已是最新版本。';

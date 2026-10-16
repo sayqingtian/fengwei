@@ -7,32 +7,56 @@
     {
       "source": "/api/*",
       "headers": [
-        { "key": "Cache-Control", "value": "private, no-store, max-age=0" }
+        {
+          "key": "Cache-Control",
+          "value": "private, no-store, max-age=0"
+        }
       ]
     },
     {
       "source": "/sw.js",
       "headers": [
-        { "key": "Cache-Control", "value": "no-cache" }
+        {
+          "key": "Cache-Control",
+          "value": "no-cache"
+        }
       ]
     },
     {
       "source": "/version.json",
       "headers": [
-        { "key": "Cache-Control", "value": "no-store, max-age=0" }
+        {
+          "key": "Cache-Control",
+          "value": "no-store, max-age=0"
+        }
       ]
     },
     {
       "source": "/*.js",
       "headers": [
-        { "key": "Cache-Control", "value": "no-cache" }
+        {
+          "key": "Cache-Control",
+          "value": "no-cache"
+        }
       ]
     },
     {
       "source": "/*.css",
       "headers": [
-        { "key": "Cache-Control", "value": "no-cache" }
+        {
+          "key": "Cache-Control",
+          "value": "no-cache"
+        }
       ]
+    }
+  ],
+  "schedules": [
+    {
+      "name": "fengwei-audit-retention",
+      "cron": "15 3 * * *",
+      "path": "/api/maintenance/audit",
+      "method": "POST",
+      "timezone": "Asia/Shanghai"
     }
   ]
 }
