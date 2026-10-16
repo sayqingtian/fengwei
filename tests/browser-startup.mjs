@@ -15,7 +15,7 @@ const database = new RecipeDatabase(new FileStore(resolve(output, `startup-test-
 const password = 'startup-isolated-browser-password', api = createApi({ database, password });
 const dish = { id: 'startup-dish', title: '冷启动保留的菜谱', category: '家常菜', description: '', notes: '', minutes: 10, servings: 2, photo: '', favorite: false, ingredients: [], steps: ['炒熟'], createdAt: new Date().toISOString(), updatedAt: new Date().toISOString() };
 await database.commit({ id: dish.id, recipe: dish, baseRevision: null, mutationId: randomUUID() });
-let failModule = false, holdRecipes = false;
+let failModule = false, holdRecipes = false, release = '3.1.5';
 const types = { '.html': 'text/html; charset=utf-8', '.js': 'text/javascript; charset=utf-8', '.css': 'text/css', '.json': 'application/json', '.webmanifest': 'application/manifest+json', '.svg': 'image/svg+xml', '.png': 'image/png' };
 const server = createServer(async (req, res) => {
   try {
@@ -28,7 +28,9 @@ const server = createServer(async (req, res) => {
     const path = resolve(root, url.pathname === '/' ? 'index.html' : decodeURIComponent(url.pathname).slice(1));
     if (!path.startsWith(root + sep)) { res.writeHead(403); res.end(); return; }
     if (failModule && path === resolve(root, 'app.js')) { res.writeHead(503); res.end(); return; }
-    const content = await readFile(path);
+    let content = await readFile(path);
+    if (path === resolve(root, 'version.json')) content = Buffer.from(JSON.stringify({ version: release }));
+    if (['sw.js', 'version.js'].some(name => path === resolve(root, name))) content = Buffer.from(content.toString().replaceAll("'3.1.5'", `'${release}'`).replace("'fengwei-shell-v28'", `'fengwei-shell-startup-${release}'`));
     res.writeHead(200, { 'Content-Type': types[extname(path)] || 'application/octet-stream', 'Cache-Control': 'no-store' }); res.end(content);
   } catch { res.writeHead(404); res.end(); }
 });
@@ -87,12 +89,19 @@ try {
   assert.equal(await cached.page.locator('#startup').count(), 0);
   await cached.page.getByText(/1 项修改已保存在本机/).waitFor();
   await cached.page.screenshot({ path: resolve(output, `startup-${engine}-cached.png`), fullPage: true });
+  // The recovery update must remain available even while a read is pending.
+  release = '3.1.6';
+  await cached.page.getByRole('navigation', { name: '底部导航' }).getByRole('button', { name: '我的', exact: true }).click();
+  await cached.page.getByRole('button', { name: '检查更新', exact: true }).click();
+  await cached.page.getByRole('button', { name: '更新并重新打开', exact: true }).click();
+  await cached.page.locator('.footer').filter({ hasText: 'v3.1.6' }).waitFor();
+  await cached.page.getByText(/1 项修改已保存在本机/).waitFor();
   holdRecipes = false;
   await cached.page.unroute('**/api/favorite/**');
   await cached.page.reload();
   await cached.page.getByRole('button', { name: `取消收藏 ${dish.title}`, exact: true }).waitFor();
   await cached.page.getByText(/1 项修改已保存在本机/).waitFor({ state: 'hidden' });
   await cached.context.close();
-  console.log(`${engine}: cached cold start paints before a stalled API and resumes the original queue.`);
+  console.log(`${engine}: cached cold start paints before a stalled API, permits updates, and resumes the original queue.`);
   assert.deepEqual(errors, []);
 } finally { await browser.close(); server.closeAllConnections(); await new Promise(resolve => server.close(resolve)); }

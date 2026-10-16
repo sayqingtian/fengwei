@@ -221,7 +221,7 @@ function renderUpdateControls() {
 
 async function applyUpdate() {
   if (updateApplying || updater.state.busy) return;
-  if (authBusy || passwordBusy || recoveryBusy || checkinBusy || recipeLoading || editor?.saving || editor?.processingPhoto || imageBusy || backupBusy || fullBackupBusy || retentionBusy) { toast('请等待当前操作完成后更新。'); return; }
+  if (authBusy || passwordBusy || recoveryBusy || checkinBusy || editor?.saving || editor?.processingPhoto || imageBusy || backupBusy || fullBackupBusy || retentionBusy) { toast('请等待当前操作完成后更新。'); return; }
   if (!saveDraftNow()) { toast('本机草稿未能保存，请先将菜谱保存到服务器后更新。'); return; }
   const formHasInput = [...document.querySelectorAll('input:not([type="hidden"]), textarea')].some(field => field.value && !field.readOnly);
   if ((editor?.dirty || formHasInput || preparedBackup || fullBackupPrepared || pendingImport) && !await ask('更新应用？', editor?.dirty ? '菜谱草稿已保存在此设备，更新后可在“我的 → 本机草稿”继续编辑。' : '请先完成正在填写的表单，或下载已生成的备份。更新会重新打开页面。', '现在更新')) return;
