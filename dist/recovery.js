@@ -1,8 +1,18 @@
+import { emailFields } from './email.js';
 const statusNames = { pending: '待处理', processing: '正在处理', reset: '已重置', rejected: '已拒绝', stale: '密码已变更', expired: '已过期' };
 const time = value => new Date(value).toLocaleString('zh-CN', { timeZone: 'Asia/Shanghai', hour12: false });
 
 export function recoveryPages({ esc, icon }) {
   return {
+    emailRequest(message = '') {
+      return `<div class="auth-overlay"><section class="auth-panel" role="dialog" aria-modal="true" aria-labelledby="auth-title"><span class="boot-mark">峰味</span><h1 id="auth-title">找回密码</h1>
+        ${message ? `<div class="recovery-success" role="status"><h2>密码已重置</h2><p>${esc(message)}</p></div>` : `<p>填写账号和已绑定的邮箱，验证后设置新密码。</p><form id="email-recovery-form" data-email-purpose="recover">
+        <label class="field"><span class="field-label">账号</span><input name="username" type="text" required maxlength="64" autocomplete="username" autocapitalize="none" spellcheck="false" placeholder="用户名或账号 ID"></label>${emailFields()}
+        <label class="field"><span class="field-label">新密码</span><input name="newPassword" type="password" required minlength="8" maxlength="128" autocomplete="new-password" placeholder="设置至少 8 位密码"></label>
+        <label class="field"><span class="field-label">确认新密码</span><input name="confirmPassword" type="password" required minlength="8" maxlength="128" autocomplete="new-password"></label>
+        <p id="email-recovery-error" class="form-error" role="alert" hidden></p><button type="submit" class="button primary">验证并重置密码</button></form><button class="text-button recovery-back" data-action="auth-manual-recovery">未绑定邮箱？联系管理员找回</button>`}
+        <button class="text-button recovery-back" data-action="auth-login">返回登录</button></section></div>`;
+    },
     request(message = '') {
       return `<div class="auth-overlay"><section class="auth-panel" role="dialog" aria-modal="true" aria-labelledby="auth-title">
         <span class="boot-mark">峰味</span><h1 id="auth-title">找回密码</h1>

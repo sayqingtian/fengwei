@@ -42,7 +42,7 @@ export function requestStore(source) {
     async get(key, options = {}) {
       const cacheKey = JSON.stringify([key, options]);
       return memo('reads', cacheKey, async () => {
-        const id = /^private\/(?:users|registrations|password-heads|password-changes|deleted-users)\/(usr_[a-f0-9]{32})(?:\/|\.json$)/.exec(key)?.[1];
+        const id = /^private\/(?:users|registrations|password-heads|password-changes|deleted-users|account-emails)\/(usr_[a-f0-9]{32})(?:\/|\.json$)/.exec(key)?.[1];
         const snapshot = id && context.getStore()?.accounts.get(id);
         if (snapshot) { const values = await snapshot; const value = values.get(key) ?? null; return options.type === 'json' ? clone(value) : value == null ? null : JSON.stringify(value); }
         if (immutable(key)) {

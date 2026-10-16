@@ -6,6 +6,7 @@ import { checkinPages, pendingCheckins } from './checkins.js';
 import { prepareFullBackup, fullBackupPanel } from './full-backup.js';
 import { myPages, roleName } from './my.js';
 import { recoveryPages } from './recovery.js';
+import { emailFields, createEmailForms } from './email.js';
 import { compressPhoto, optimizeDataPhoto, photoSize } from './photo.js';
 import { imagePage } from './photos-page.js';
 import { prepareBackup, backupExportPanel } from './backup.js';
@@ -52,6 +53,8 @@ const paths = {
 const icon = name => `<svg class="icon" viewBox="0 0 24 24" aria-hidden="true">${paths[name] || paths.book}</svg>`;
 const my = myPages({ icon, esc });
 const recoveryView = recoveryPages({ icon, esc });
+const emailForms = createEmailForms(createId);
+let emailBusy = false, emailMutationId = null;
 const checkinView = checkinPages({ icon, esc });
 const bowlArt = `<svg viewBox="0 0 140 140" aria-hidden="true"><g fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><ellipse cx="70" cy="60" rx="47" ry="14"/><path d="M23 60c4 40 21 55 47 55s43-15 47-55M53 120h34M56 36c-12-13 12-14 0-27M72 34c-12-13 12-14 0-27"/><path d="M83 53c-2-20 10-31 28-29 3 17-8 30-28 29Zm1-1 16-16"/></g><ellipse cx="67" cy="63" rx="33" ry="7" fill="currentColor" opacity=".15"/></svg>`;
 const heroArt = `<svg viewBox="0 0 360 270" aria-hidden="true"><ellipse cx="185" cy="240" rx="144" ry="13" fill="#e9ebdf"/><g transform="rotate(-9 171 149)"><rect x="78" y="45" width="178" height="194" rx="9" fill="#cdd8b4"/><rect x="89" y="42" width="161" height="187" rx="5" fill="#fffdf1" stroke="#dfe2ce"/><path d="M109 42v187" stroke="#dacdb9" stroke-width="1.3"/><path d="M132 77h94M132 95h55M132 170h87M132 188h76M132 205h88" stroke="#dce1cf" stroke-width="3" stroke-linecap="round"/><text x="132" y="148" fill="#647b56" font-family="serif" font-size="28">好好吃饭</text><g fill="none" stroke="#6f8260" stroke-width="3"><path d="M100 65c-22-11-22 10 0 9M100 104c-22-11-22 10 0 9M100 143c-22-11-22 10 0 9M100 182c-22-11-22 10 0 9"/></g></g><g transform="rotate(12 278 166)"><path d="M268 97h14v128l-7 16-7-16Z" fill="#c88b58"/><path d="M270 103h4v122" stroke="#eccca6" stroke-width="3"/><path d="m268 225 7 16 7-16" fill="#e7d4a7"/><path d="m272 235 3 6 3-6" fill="#4b5c43"/></g><g fill="#8f9f70"><path d="M281 81c-10-38 18-60 49-54-2 34-20 55-49 54Z"/><path d="M286 82c26-4 44 11 47 35-24 5-44-7-47-35Z"/></g><path d="m275 101 39-62M287 83l31 22" stroke="#526d49" stroke-width="2" fill="none"/><circle cx="65" cy="211" r="23" fill="#c9754c"/><path d="m53 192 12 5 9-7-4 11 10 6-13-1-7 8 1-12Z" fill="#6d8359"/><path d="M52 217c2 6 6 8 11 9" stroke="#dfaa83" stroke-width="3" stroke-linecap="round" fill="none"/><path d="m42 101 3 6 7 1-6 5 1 7-6-4-6 4 1-7-5-5 7-1Z" fill="#d2bb8e"/><path d="M302 196h12m-6-6v12" stroke="#b3ba91" stroke-width="2" stroke-linecap="round"/></svg>`;
@@ -221,7 +224,7 @@ function renderUpdateControls() {
 
 async function applyUpdate() {
   if (updateApplying || updater.state.busy) return;
-  if (authBusy || passwordBusy || recoveryBusy || checkinBusy || editor?.saving || editor?.processingPhoto || imageBusy || backupBusy || fullBackupBusy || retentionBusy) { toast('请等待当前操作完成后更新。'); return; }
+  if (authBusy || passwordBusy || recoveryBusy || emailBusy || checkinBusy || editor?.saving || editor?.processingPhoto || imageBusy || backupBusy || fullBackupBusy || retentionBusy) { toast('请等待当前操作完成后更新。'); return; }
   if (!saveDraftNow()) { toast('本机草稿未能保存，请先将菜谱保存到服务器后更新。'); return; }
   const formHasInput = [...document.querySelectorAll('input:not([type="hidden"]), textarea')].some(field => field.value && !field.readOnly);
   if ((editor?.dirty || formHasInput || preparedBackup || fullBackupPrepared || pendingImport) && !await ask('更新应用？', editor?.dirty ? '菜谱草稿已保存在此设备，更新后可在“我的 → 本机草稿”继续编辑。' : '请先完成正在填写的表单，或下载已生成的备份。更新会重新打开页面。', '现在更新')) return;
@@ -331,13 +334,22 @@ function showLogin(message = '登录查看所有共享菜谱，收藏夹只记�
   $('#app').inert = true; $('#modal-root').inert = true;
   const register = mode === 'register';
   if (register) registrationId = createId();
-  $('#auth-root').innerHTML = `<div class="auth-overlay"><section class="auth-panel" role="dialog" aria-modal="true" aria-labelledby="auth-title"><span class="boot-mark">峰味</span><h1 id="auth-title">${register ? '注册自己的账号' : '打开共享菜谱本'}</h1><p>${esc(message)}</p><div class="auth-tabs" role="group" aria-label="登录或注册"><button class="${register ? '' : 'active'}" data-action="auth-login" aria-pressed="${!register}">登录账号</button><button class="${register ? 'active' : ''}" data-action="auth-register" aria-pressed="${register}">注册账号</button></div><form id="${register ? 'register-form' : 'login-form'}">${register ? '<label class="field"><span class="field-label">用户名</span><input id="register-name" name="displayName" type="text" autocomplete="username" required maxlength="30" placeholder="设置唯一用户名"></label>' : `<label class="field"><span class="field-label">账号</span><input id="login-username" name="username" type="text" autocomplete="username" required maxlength="64" placeholder="用户名或账号 ID" autocapitalize="none" spellcheck="false"></label>`}<label class="field"><span class="field-label">密码</span><input id="access-password" name="password" type="password" autocomplete="${register ? 'new-password' : 'current-password'}" required ${register ? 'minlength="8" maxlength="128" placeholder="设置至少 8 位密码"' : 'maxlength="256" placeholder="输入密码"'}></label>${register ? '<label class="field"><span class="field-label">确认密码</span><input id="register-confirm" type="password" autocomplete="new-password" required minlength="8" maxlength="128" placeholder="再次输入密码"></label><p class="small-note">用户名只能注册一次，不区分大小写和首尾空格。注册后可以用用户名或账号 ID 登录。</p>' : ''}<p id="login-error" class="form-error" role="alert" hidden></p><button class="button primary" type="submit">${register ? '注册并登录' : '打开菜谱本'}</button></form>${!register ? '<button class="text-button recovery-back" data-action="auth-recovery">忘记密码？</button>' : ''}<div data-version-controls class="version-controls"></div><p class="small-note">保持登录 90 天。普通账号默认仅可查看菜谱，编辑需要管理员授权；收藏各自独立。</p></section></div>`;
+  $('#auth-root').innerHTML = `<div class="auth-overlay"><section class="auth-panel" role="dialog" aria-modal="true" aria-labelledby="auth-title"><span class="boot-mark">峰味</span><h1 id="auth-title">${register ? '注册自己的账号' : '打开共享菜谱本'}</h1><p>${esc(message)}</p><div class="auth-tabs" role="group" aria-label="登录或注册"><button class="${register ? '' : 'active'}" data-action="auth-login" aria-pressed="${!register}">登录账号</button><button class="${register ? 'active' : ''}" data-action="auth-register" aria-pressed="${register}">注册账号</button></div><form id="${register ? 'register-form' : 'login-form'}" data-email-purpose="${register ? 'register' : ''}">${register ? '<label class="field"><span class="field-label">用户名</span><input id="register-name" name="displayName" type="text" autocomplete="username" required maxlength="30" placeholder="设置唯一用户名"></label>' + emailFields() : `<label class="field"><span class="field-label">账号</span><input id="login-username" name="username" type="text" autocomplete="username" required maxlength="64" placeholder="用户名或账号 ID" autocapitalize="none" spellcheck="false"></label>`}<label class="field"><span class="field-label">密码</span><input id="access-password" name="password" type="password" autocomplete="${register ? 'new-password' : 'current-password'}" required ${register ? 'minlength="8" maxlength="128" placeholder="设置至少 8 位密码"' : 'maxlength="256" placeholder="输入密码"'}></label>${register ? '<label class="field"><span class="field-label">确认密码</span><input id="register-confirm" type="password" autocomplete="new-password" required minlength="8" maxlength="128" placeholder="再次输入密码"></label><p class="small-note">用户名只能注册一次，不区分大小写和首尾空格。验证邮箱后即可注册，可用用户名或账号 ID 登录。</p>' : ''}<p id="login-error" class="form-error" role="alert" hidden></p><button class="button primary" type="submit">${register ? '注册并登录' : '打开菜谱本'}</button></form>${!register ? '<button class="text-button recovery-back" data-action="auth-recovery">忘记密码？</button>' : ''}<div data-version-controls class="version-controls"></div><p class="small-note">保持登录 90 天。普通账号默认仅可查看菜谱，编辑需要管理员授权；收藏各自独立。</p></section></div>`;
   $('#auth-title').tabIndex = -1;
   renderUpdateControls();
   focusInitialField(register ? $('#register-name') : $('#login-username'), $('#auth-title'));
 }
 
 function showRecoveryRequest() {
+  if (emailBusy) return;
+  emailMutationId = createId();
+  $('#app').inert = true; $('#modal-root').inert = true;
+  $('#auth-root').innerHTML = recoveryView.emailRequest();
+  $('#auth-title').tabIndex = -1;
+  focusInitialField($('#email-recovery-form [name="username"]'), $('#auth-title'));
+}
+
+function showManualRecoveryRequest() {
   recoveryRequestId = createId();
   $('#app').inert = true; $('#modal-root').inert = true;
   $('#auth-root').innerHTML = recoveryView.request();
@@ -360,9 +372,9 @@ async function submitRecoveryRequest(form) {
 }
 
 async function login(form) {
-  if (authBusy) return;
+  if (authBusy || emailBusy) return;
   authBusy = true;
-  const button = form.querySelector('button'), error = $('#login-error');
+  const button = form.querySelector('button[type="submit"]'), error = $('#login-error');
   button.disabled = true; error.hidden = true;
   const panel = form.closest('.auth-panel');
   const register = form.id === 'register-form';
@@ -373,7 +385,7 @@ async function login(form) {
     loginTimer = setTimeout(() => { if ($('#login-stage')) $('#login-stage').textContent = '连接稍慢，仍在为你打开，请稍候…'; }, 6000);
     if (register) {
       if ($('#access-password').value !== $('#register-confirm').value) throw new Error('两次输入的密码不一致，请重新确认。');
-      await db.register($('#register-name').value.trim(), $('#access-password').value, registrationId);
+      await db.register($('#register-name').value.trim(), $('#access-password').value, registrationId, emailForms.proof(form));
       page = 'account';
     } else await db.login($('#login-username').value.trim(), $('#access-password').value);
     if (editor && editor.userId !== db.user?.id) { saveDraftNow(); clearEditorMemory(); }
@@ -393,10 +405,48 @@ async function login(form) {
   finally { clearTimeout(loginTimer); authBusy = false; panel.classList.remove('auth-working'); panel.removeAttribute('aria-busy'); $('#login-progress')?.remove(); renderUpdateControls(); }
 }
 
+async function sendEmailCode(form) {
+  if (authBusy || emailBusy) return;
+  for (const name of ['email', 'username', 'currentPassword']) if (form.elements[name] && !form.elements[name].reportValidity()) return;
+  const error = form.querySelector('.form-error');
+  emailBusy = true; error.hidden = true;
+  form.inert = true;
+  try { await emailForms.send(form, db, db.user?.id); }
+  catch (problem) { if (form.isConnected) { error.textContent = errorText(problem); error.hidden = false; } }
+  finally { emailBusy = false; form.inert = false; }
+}
+
+function showBindEmail() {
+  if (!db?.authenticated || emailBusy || db.user.emailVerifiedAt) return;
+  emailMutationId = createId();
+  showModal(`<div class="modal-header"><h2 id="modal-title" tabindex="-1">绑定找回邮箱</h2><button class="icon-button" data-action="close" aria-label="关闭邮箱绑定">${icon('close')}</button></div><div class="modal-scroll"><p class="page-lead">验证当前密码和邮箱后，可以通过邮箱找回密码。</p><form id="email-bind-form" data-email-purpose="bind"><label class="field"><span class="field-label">当前密码</span><input name="currentPassword" type="password" required maxlength="256" autocomplete="current-password"></label>${emailFields()}<p id="email-bind-error" class="form-error" role="alert" hidden></p><button type="submit" class="button primary">验证并绑定邮箱</button></form></div>`);
+}
+
+async function submitEmailForm(form) {
+  if (authBusy || emailBusy || !form.reportValidity()) return;
+  const bind = form.id === 'email-bind-form', values = Object.fromEntries(new FormData(form));
+  const button = form.querySelector('button[type="submit"]'), error = form.querySelector('.form-error');
+  error.hidden = true;
+  if (!bind && values.newPassword !== values.confirmPassword) { error.textContent = '两次输入的新密码不一致。'; error.hidden = false; return; }
+  let verification;
+  try { verification = emailForms.proof(form); } catch (problem) { error.textContent = errorText(problem); error.hidden = false; return; }
+  emailBusy = true; form.inert = true; button.disabled = true;
+  const original = button.textContent; button.textContent = '正在验证…';
+  try {
+    const data = { ...values, ...verification, mutationId: emailMutationId };
+    if (bind) {
+      await db.bindEmail(data); form.reset(); emailBusy = false; await closeModal(); render(); toast('邮箱已绑定，可用于找回密码。');
+    } else {
+      const result = await db.recoverWithEmail(data); form.reset(); $('#auth-root').innerHTML = recoveryView.emailRequest(result.message); $('#auth-root [data-action="auth-login"]').focus();
+    }
+  } catch (problem) { if (form.isConnected) { error.textContent = errorText(problem); error.hidden = false; } }
+  finally { emailBusy = false; form.inert = false; button.disabled = false; button.textContent = original; }
+}
+
 function accountPage() {
   const user = db?.user;
   if (!user) return '<h1 class="page-title">我的账号</h1><p class="page-lead">登录后查看账号信息。</p>';
-  return `<h1 class="page-title">我的账号</h1><p class="page-lead">你好，${esc(user.displayName)}。<br>共享好味道，收藏自己的心头好。</p><section class="panel account-panel"><div class="panel-icon">${icon('people')}</div><h2>${esc(user.displayName)} <span class="role-badge">${roleName(user)}</span></h2><label class="field"><span class="field-label">账号 ID</span><input id="account-id" type="text" value="${esc(user.id)}" readonly spellcheck="false" aria-label="账号 ID"></label><button class="button ghost" data-action="copy-account">${icon('share')}复制账号 ID</button><p class="small-note">可用用户名或这个账号 ID 登录。如果旧用户名存在重名，请使用账号 ID 登录。${user.legacy ? '原账号 wupanfeng 仍可使用，请用当前密码登录。' : ''}</p><div class="account-rules"><p>${user.canEdit ? "当前拥有新增、编辑、删除、导入和恢复菜谱的权限。" : "当前仅有查看权限；编辑前请到账号授权页面申请。"}</p><p>你的 ${recipes.filter(recipe => recipe.favorite).length} 道收藏只属于这个账号，登录同一账号后可跨设备查看。</p></div><div class="management-actions"><button class="button ghost" data-action="navigate" data-page="permissions">账号授权</button><button class="button ghost" data-action="change-password">修改密码</button><button class="button ghost" data-action="logout">退出当前账号</button><button class="button ghost" data-action="logout-all">退出所有设备</button></div>${user.passwordChangedAt ? `<p class="small-note">最近修改密码：${esc(new Date(user.passwordChangedAt).toLocaleString("zh-CN", { timeZone: "Asia/Shanghai", hour12: false }))}</p>` : ""}</section>`;
+  return `<h1 class="page-title">我的账号</h1><p class="page-lead">你好，${esc(user.displayName)}。<br>共享好味道，收藏自己的心头好。</p><section class="panel account-panel"><div class="panel-icon">${icon('people')}</div><h2>${esc(user.displayName)} <span class="role-badge">${roleName(user)}</span></h2><label class="field"><span class="field-label">账号 ID</span><input id="account-id" type="text" value="${esc(user.id)}" readonly spellcheck="false" aria-label="账号 ID"></label><button class="button ghost" data-action="copy-account">${icon('share')}复制账号 ID</button><p class="small-note">可用用户名或这个账号 ID 登录。如果旧用户名存在重名，请使用账号 ID 登录。${user.legacy ? '原账号 wupanfeng 仍可使用，请用当前密码登录。' : ''}</p><div class="account-rules"><p>${user.canEdit ? "当前拥有新增、编辑、删除、导入和恢复菜谱的权限。" : "当前仅有查看权限；编辑前请到账号授权页面申请。"}</p><p>你的 ${recipes.filter(recipe => recipe.favorite).length} 道收藏只属于这个账号，登录同一账号后可跨设备查看。</p></div><div class="management-actions"><button class="button ghost" data-action="navigate" data-page="permissions">账号授权</button><button class="button ghost" data-action="change-password">修改密码</button><button class="button ghost" data-action="logout">退出当前账号</button><button class="button ghost" data-action="logout-all">退出所有设备</button></div>${user.passwordChangedAt ? `<p class="small-note">最近修改密码：${esc(new Date(user.passwordChangedAt).toLocaleString("zh-CN", { timeZone: "Asia/Shanghai", hour12: false }))}</p>` : ""}</section><section class="panel account-email-panel"><h2>找回邮箱</h2>${user.emailVerifiedAt ? `<p class="account-email">${esc(user.email)}</p><p class="small-note">已验证。忘记密码时，可在登录页通过此邮箱重置。</p>` : `<p class="small-note">绑定邮箱后，即使忘记密码也能自行找回。管理员账号也建议绑定。</p><button class="button primary" data-action="bind-email">绑定找回邮箱</button>`}</section>`;
 }
 
 function recipePage() {
@@ -477,7 +527,7 @@ async function ask(title, message, action, danger = false) {
 }
 
 async function closeModal() {
-  if (passwordBusy || recoveryBusy || checkinBusy || editor?.saving || editor?.processingPhoto) return;
+  if (passwordBusy || recoveryBusy || emailBusy || checkinBusy || editor?.saving || editor?.processingPhoto) return;
   if (checkinDraft && $('#checkin-form [name="note"]')?.value.trim() && !await ask('还没提交打卡', '关闭后，本次填写的心得会丢失。', '放弃打卡')) return;
   checkinDraft = null;
   passwordMutationId = null;
@@ -943,9 +993,12 @@ async function handleAction(button) {
     case 'reload-checkins': await loadCheckins(); break;
     case 'more-checkins': await loadCheckins(true); break;
     case 'delete-checkin': await deleteCheckin(id); break;
-    case 'auth-login': if (!authBusy) showLogin(); break;
-    case 'auth-register': if (!authBusy) showLogin('注册后自动登录，可以查看所有共享菜谱，并拥有自己的收藏夹。', 'register'); break;
-    case 'auth-recovery': if (!authBusy) showRecoveryRequest(); break;
+    case 'auth-login': if (!authBusy && !emailBusy) showLogin(); break;
+    case 'auth-register': if (!authBusy && !emailBusy) showLogin('验证邮箱后注册，可以查看共享菜谱，并拥有自己的收藏夹。', 'register'); break;
+    case 'auth-recovery': if (!authBusy && !emailBusy) showRecoveryRequest(); break;
+    case 'auth-manual-recovery': if (!authBusy && !emailBusy) showManualRecoveryRequest(); break;
+    case 'send-email-code': await sendEmailCode(button.closest('form')); break;
+    case 'bind-email': showBindEmail(); break;
     case 'reload-recovery': await loadRecoveries(); break;
     case 'recovery-decision': showRecoveryDecision(button.dataset); break;
     case 'generate-recovery-password': {
@@ -1051,6 +1104,11 @@ document.addEventListener('click', event => {
   if (button && !button.disabled) handleAction(button).catch(error => toast(errorText(error)));
 });
 document.addEventListener('input', event => {
+  const emailForm = event.target.closest('form[data-email-purpose]');
+  if (emailForm) {
+    emailForms.changed(emailForm, event.target);
+    if (emailForm.id !== 'register-form') { emailMutationId = createId(); emailForm.querySelector('.form-error').hidden = true; }
+  }
   if (event.target.id === 'search') { query = event.target.value; if (!event.isComposing) renderResults(); }
   else if (event.target.closest('#login-form, #register-form')) { $('#login-error').hidden = true; if (event.target.closest('#register-form')) registrationId = createId(); }
   else if (event.target.closest('#password-change-form')) { passwordMutationId = createId(); $('#password-change-error').hidden = true; }
@@ -1078,6 +1136,7 @@ document.addEventListener('change', async event => {
 document.addEventListener('submit', event => {
   const form = event.target;
   if (form.id === 'checkin-form') { event.preventDefault(); submitCheckin(form); return; }
+  if (['email-recovery-form', 'email-bind-form'].includes(form.id)) { event.preventDefault(); submitEmailForm(form); return; }
   if (form.id === 'password-recovery-form') { event.preventDefault(); submitRecoveryRequest(form); return; }
   if (form.id === 'recovery-decision-form') { event.preventDefault(); submitRecoveryDecision(form); return; }
   if (form.id === 'full-backup-form') { event.preventDefault(); generateFullBackup(form); return; }
@@ -1139,6 +1198,8 @@ window.addEventListener('fengwei:login-required', async () => {
   if (recoveryForm || $('#recovery-result-password')) { recoveryForm?.reset(); recoveryBusy = false; await closeModal(); }
   const passwordForm = $('#password-change-form');
   if (passwordForm) { passwordForm.reset(); passwordBusy = false; await closeModal(); }
+  const emailForm = $('#email-bind-form');
+  if (emailForm) { emailForm.reset(); emailBusy = false; await closeModal(); }
   resetBackup(); imageStop = true; imageData = null;
   permissionData = null; auditData = null; recoveryData = null; recoveryError = '';
   recipes = []; pendingImport = null; historyItems = []; render();
@@ -1157,6 +1218,8 @@ channel?.addEventListener('message', async event => {
       if (recoveryForm || $('#recovery-result-password')) { recoveryForm?.reset(); recoveryBusy = false; await closeModal(); }
       const passwordForm = $('#password-change-form');
       if (passwordForm) { passwordForm.reset(); passwordBusy = false; await closeModal(); }
+      const emailForm = $('#email-bind-form');
+      if (emailForm) { emailForm.reset(); emailBusy = false; await closeModal(); }
       resetBackup(); imageStop = true; imageData = null;
       permissionData = null; auditData = null; recoveryData = null; recoveryError = '';
       if (event.data.userId) saveDraftNow(); else { try { draftStore?.clear(db.user?.id); } catch {} }

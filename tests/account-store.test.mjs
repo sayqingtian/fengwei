@@ -4,7 +4,7 @@ import { readFile } from 'node:fs/promises';
 import { randomUUID } from 'node:crypto';
 import { PGlite } from '@electric-sql/pglite';
 import { createAccountStore } from '../server/account-store.mjs';
-import { RecipeDatabase } from '../server/database.mjs';
+import { RecipeDatabase, hash } from '../server/database.mjs';
 import { createApi } from '../server/api.mjs';
 
 const pg = new PGlite();
@@ -87,6 +87,56 @@ function fixture() {
   return { source, namespace, requests, settings, store, api, call };
 }
 const cookieOf = response => response.headers.get('set-cookie')?.split(';')[0];
+
+test('shared email budgets reserve the last daily slot once and stop at the monthly cap', async () => {
+  const f = fixture(), messages = [], store = f.store();
+  const mailer = { configured: true, async sendCode(value) { messages.push(value); } };
+  const handler = () => createApi({ database: new RecipeDatabase(f.store()), password: fixturePassword, mailer });
+  const handlers = [handler(), handler()], date = new Date().toISOString();
+  const daily = `private/rate-limits/email-daily/${hash(date.slice(0, 10))}.json`, monthly = `private/rate-limits/email-monthly/${hash(date.slice(0, 7))}.json`;
+  await store.setJSON(daily, { count: 89, expires: Date.now() + 86400000, version: randomUUID() });
+  const send = (api, suffix) => f.call(api, 'email/code', 'POST', { purpose: 'register', email: `budget-${suffix}@example.test`, requestId: randomUUID() });
+  const responses = await Promise.all(handlers.map((api, i) => send(api, i)));
+  assert.deepEqual(responses.map(response => response.status).sort(), [200, 429]);
+  assert.equal((await responses.find(response => response.status === 429).json()).code, 'EMAIL_DAILY_LIMIT');
+  assert.equal(messages.length, 1);
+  await store.setJSON(daily, { count: 0, expires: Date.now() + 86400000, version: randomUUID() });
+  await store.setJSON(monthly, { count: 2900, expires: Date.now() + 32 * 86400000, version: randomUUID() });
+  const blocked = await send(handler(), 'monthly');
+  assert.equal(blocked.status, 429); assert.equal((await blocked.json()).code, 'EMAIL_MONTHLY_LIMIT');
+  assert.equal(messages.length, 1);
+});
+
+test('email binding and single-use resets persist in SQL across independent cloud handlers', async () => {
+  const f = fixture(), messages = [];
+  const mailer = { configured: true, async sendCode(value) { messages.push(value); } };
+  const handler = () => createApi({ database: new RecipeDatabase(f.store()), password: fixturePassword, mailer });
+  const first = handler(), second = handler();
+  const login = await f.call(first, 'login', 'POST', { username: 'wupanfeng', password: fixturePassword });
+  const cookie = cookieOf(login), user = (await login.json()).user, email = 'sql-owner@example.test';
+  const sent = await f.call(first, 'email/code', 'POST', { requestId: randomUUID(), purpose: 'bind', email, currentPassword: fixturePassword, expectedUserId: user.id }, cookie);
+  assert.equal(sent.status, 200);
+  const { challengeId } = await sent.json(), code = messages.at(-1).code;
+  const binding = await f.call(second, 'account/email', 'POST', { email, code, challengeId, currentPassword: fixturePassword, expectedUserId: user.id, mutationId: randomUUID() }, cookie);
+  assert.equal(binding.status, 200, await binding.clone().text());
+  assert.equal((await (await f.call(first, 'me', 'GET', undefined, cookie)).json()).user.email, email, 'warm credential snapshots must include fresh email bindings');
+  // Expire only the send cooldown; no waiting or production clock changes.
+  await pg.query('delete from fengwei_account_records where namespace=$1 and key=$2', [f.namespace, `private/rate-limits/email-cooldown/${hash(email)}.json`]);
+  const recovery = await f.call(handler(), 'email/code', 'POST', { requestId: randomUUID(), purpose: 'recover', username: user.id, email });
+  assert.equal(recovery.status, 200, await recovery.clone().text());
+  const proof = { email, code: messages.at(-1).code, challengeId: (await recovery.json()).challengeId, username: user.id };
+  const passwords = ['sql-email-reset-first-password', 'sql-email-reset-second-password'];
+  const responses = await Promise.all([first, second].map((api, i) => f.call(api, 'account/email-recovery', 'POST', { ...proof, mutationId: randomUUID(), newPassword: passwords[i], confirmPassword: passwords[i] })));
+  assert.deepEqual(responses.map(response => response.status).sort(), [200, 400]);
+  const winner = responses.findIndex(response => response.status === 200);
+  assert.equal((await f.call(handler(), 'me', 'GET', undefined, cookie)).status, 401);
+  assert.equal((await f.call(handler(), 'login', 'POST', { username: user.id, password: passwords[winner] })).status, 200);
+  const rows = (await pg.query('select key, value from fengwei_account_records where namespace=$1 and (key like $2 or key like $3)', [f.namespace, 'private/email-%', 'private/account-emails/%'])).rows;
+  assert.ok(rows.some(row => row.key === `private/account-emails/${user.id}.json`));
+  assert.equal(rows.filter(row => row.key.startsWith('private/email-code-uses/')).length, 2);
+  assert.ok(!JSON.stringify(rows).includes(passwords[winner]));
+  assert.ok([...f.source.records.keys()].every(key => !/^private\/(email-|account-emails\/)/.test(key)), 'Blob must never receive email credentials or verification records');
+});
 
 test('cooking check-ins use the existing SQL table and reserve one record across independent cloud handlers', async () => {
   const f = fixture(), first = f.store(), second = f.store();
@@ -207,6 +257,7 @@ test('legacy Blob credentials, password versions, username claims and shared rec
   const password = 'migrated-account-current-password';
   const changed = await f.call(legacy, 'account/password', 'POST', { currentPassword: fixturePassword, newPassword: password, confirmPassword: password, mutationId: randomUUID() }, cookieOf(oldUser));
   assert.equal(changed.status, 200);
+  await f.source.setJSON(`private/account-emails/${oldProfile.id}.json`, { userId: oldProfile.id, email: 'migrated@example.test', verifiedAt: new Date().toISOString() });
   await f.source.setJSON('recipes/legacy.json', { title: '原有共享菜谱', photoHash: 'existing-photo' });
   // Recover the old account from its registration and name reservation even
   // if the original final users write was interrupted.
@@ -214,7 +265,8 @@ test('legacy Blob credentials, password versions, username claims and shared rec
   f.source.atomic(false);
   const migrated = f.api();
   const login = await f.call(migrated, 'login', 'POST', { username: '旧用户', password });
-  assert.equal(login.status, 200); assert.equal((await login.json()).user.id, oldProfile.id);
+  assert.equal(login.status, 200); const profile = (await login.json()).user;
+  assert.equal(profile.id, oldProfile.id); assert.equal(profile.email, 'migrated@example.test');
   assert.equal((await f.call(migrated, 'login', 'POST', { username: '旧用户', password: fixturePassword })).status, 401);
   assert.equal((await f.call(migrated, 'me', 'GET', undefined, oldCookie)).status, 200);
   const duplicate = await f.call(migrated, 'register', 'POST', { displayName: '旧用户', password, registrationId: randomUUID() });

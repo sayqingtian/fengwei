@@ -6,7 +6,7 @@ import { AUDIT_PREFIX, auditTerms } from './audit-index.mjs';
 const removablePhotoMetadata = key => /^private\/photo-(optimizations|optimized)\/[a-f0-9]{64}\.json$/.test(key);
 const removableCheckinObject = key => /^private\/cooking-checkins\/usr_[a-f0-9]{32}\/[a-f0-9]{64}\.json$/.test(key);
 const removableRecipeObject = key => /^recipes\/[a-f0-9]{64}\/\d{12}-\d{13}-[a-zA-Z0-9-]{8,200}\.json$/.test(key) || /^private\/favorites\/usr_[a-f0-9]{32}\/[a-f0-9]{64}\/\d{13}-[a-zA-Z0-9-]+\.json$/.test(key);
-const accountPrefixes = ['private/photo-leases/', 'private/users/', 'private/usernames/', 'private/registrations/', 'private/password-changes/', 'private/password-heads/', 'private/account-migrations/', 'private/password-recovery-requests/', 'private/cooking-checkins/', 'private/password-recovery-decisions/', 'private/password-recovery-limits/', 'private/deleted-users/', 'private/rate-limits/', 'private/audit-index/', 'private/audit-canonical/', 'private/audit-migration/', 'private/cooking-checkin-deletions/'];
+const accountPrefixes = ['private/account-emails/', 'private/email-challenges/', 'private/email-secrets/', 'private/email-code-heads/', 'private/email-code-sent/', 'private/email-code-uses/', 'private/photo-leases/', 'private/users/', 'private/usernames/', 'private/registrations/', 'private/password-changes/', 'private/password-heads/', 'private/account-migrations/', 'private/password-recovery-requests/', 'private/cooking-checkins/', 'private/password-recovery-decisions/', 'private/password-recovery-limits/', 'private/deleted-users/', 'private/rate-limits/', 'private/audit-index/', 'private/audit-canonical/', 'private/audit-migration/', 'private/cooking-checkin-deletions/'];
 const probePrefix = 'private/registration-storage-check';
 const sqlOnly = key => /^private\/(photo-leases|rate-limits|audit-index|audit-canonical|audit-migration)\//.test(key);
 const bindingKey = 'private/account-database-binding.json';
@@ -168,7 +168,7 @@ class SupabaseAccountStore {
   async accountSnapshot(id) {
     if (!/^usr_[a-f0-9]{32}$/.test(id)) throw unavailable('ACCOUNT_DATABASE_UNSUPPORTED_KEY');
     const changes = `private/password-changes/${id}/`, marker = `private/account-migrations/${id}.json`;
-    const fixed = [`private/users/${id}.json`, `private/registrations/${id}.json`, `private/password-heads/${id}.json`, marker, `private/deleted-users/${id}.json`];
+    const fixed = [`private/users/${id}.json`, `private/registrations/${id}.json`, `private/password-heads/${id}.json`, marker, `private/deleted-users/${id}.json`, `private/account-emails/${id}.json`];
     const matches = key => fixed.includes(key) || key.startsWith(changes);
     const read = async () => {
       const records = new Map();
@@ -185,7 +185,7 @@ class SupabaseAccountStore {
     if (records.get(marker)?.version !== 1) {
       // Import the complete legacy credential chain once before relying on a
       // single fresh SQL snapshot. Missing Blob keys then need no repeated IO.
-      const legacyKeys = [fixed[0], fixed[1], fixed[2], fixed[4]];
+      const legacyKeys = [fixed[0], fixed[1], fixed[2], fixed[4], fixed[5]];
       const [values, history] = await Promise.all([
         Promise.all(legacyKeys.map(key => this.source.get(key, { type: 'json', consistency: 'strong' }))),
         this.source.list({ prefix: changes, consistency: 'strong' }),

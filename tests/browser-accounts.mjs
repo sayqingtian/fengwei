@@ -1,9 +1,11 @@
 import assert from 'node:assert/strict';
-import { writeFile, mkdir } from 'node:fs/promises';
-import { resolve } from 'node:path';
+import { readFile, writeFile, mkdir } from 'node:fs/promises';
+import { resolve, extname, sep } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { randomUUID } from 'node:crypto';
-import { spawn } from 'node:child_process';
+import { createServer } from 'node:http';
+import { Readable } from 'node:stream';
+import { createApi } from '../server/api.mjs';
 import { RecipeDatabase } from '../server/database.mjs';
 import { FileStore } from '../server/file-store.mjs';
 
@@ -14,12 +16,26 @@ const output = resolve('artifacts'); await mkdir(output, { recursive: true });
 const database = new RecipeDatabase(new FileStore(dataDirectory));
 const recipe = { id: 'shared-browser-recipe', title: '共享番茄炒蛋', category: '家常菜', description: '同一道菜，各自收藏', minutes: 15, servings: 2, favorite: true, photo: '', notes: '', ingredients: [{ name: '番茄', amount: '2 个' }], steps: ['把鸡蛋炒熟，再加入炒软的番茄。'], createdAt: new Date().toISOString(), updatedAt: new Date().toISOString() };
 await database.commit({ id: recipe.id, recipe, baseRevision: null, mutationId: 'legacy-browser-account-seed' });
-const child = spawn(process.execPath, ['scripts/serve.mjs'], { env: { ...process.env, NODE_ENV: 'test', FENGWEI_TEST_PASSWORD: password, RECIPE_DATA_DIR: dataDirectory, RECIPE_PORT: '4181' }, stdio: ['ignore', 'pipe', 'pipe'] });
-await new Promise((resolve, reject) => {
-  const timer = setTimeout(() => { child.kill(); reject(new Error('Test server not ready')); }, 10000);
-  child.stdout.on('data', chunk => { if (String(chunk).includes('Local:')) { clearTimeout(timer); resolve(); } });
-  child.on('error', reject);
+const messages = [], root = resolve('dist'), base = 'http://localhost:4181';
+const mailer = { configured: true, async sendCode(value) { messages.push(value); } };
+const handler = createApi({ database, password, mailer });
+const types = { '.html': 'text/html; charset=utf-8', '.js': 'text/javascript; charset=utf-8', '.css': 'text/css', '.json': 'application/json', '.svg': 'image/svg+xml', '.png': 'image/png', '.avif': 'image/avif', '.webp': 'image/webp', '.wasm': 'application/wasm', '.webmanifest': 'application/manifest+json' };
+const server = createServer(async (req, res) => {
+  try {
+    const url = new URL(req.url, base);
+    if (url.pathname.startsWith('/api/')) {
+      const response = await handler(new Request(url, { method: req.method, headers: req.headers, ...(!['GET', 'HEAD'].includes(req.method) ? { body: Readable.toWeb(req), duplex: 'half' } : {}) }), { clientIp: req.socket.remoteAddress });
+      res.writeHead(response.status, Object.fromEntries(response.headers)); res.end(Buffer.from(await response.arrayBuffer())); return;
+    }
+    const path = resolve(root, '.' + (url.pathname === '/' ? '/index.html' : decodeURIComponent(url.pathname)));
+    if (!path.startsWith(root + sep)) { res.writeHead(403); res.end(); return; }
+    const data = await readFile(path);
+    res.writeHead(200, { 'Content-Type': types[extname(path)] || 'application/octet-stream', 'Cache-Control': 'no-cache' }); res.end(data);
+  } catch { res.writeHead(404); res.end('Not found'); }
 });
+await new Promise(resolve => server.listen(4181, '127.0.0.1', resolve));
+const realNow = Date.now; let timeOffset = 0;
+Date.now = () => realNow() + timeOffset;
 const playwright = await import(process.env.RECIPE_PLAYWRIGHT ? pathToFileURL(process.env.RECIPE_PLAYWRIGHT).href : 'playwright');
 const browser = await playwright.chromium.launch({ headless: true, ...(process.env.RECIPE_BROWSER ? { executablePath: process.env.RECIPE_BROWSER } : {}) });
 const ownerContext = await browser.newContext({ viewport: { width: 390, height: 844 }, isMobile: true, hasTouch: true });
@@ -45,9 +61,26 @@ try {
   assert.equal(await newcomer.getByLabel('密码', { exact: true }).inputValue(), '');
   await logIn(owner, 'wupanfeng', password);
   await owner.getByRole('button', { name: '取消收藏 共享番茄炒蛋', exact: true }).waitFor();
+  await nav(owner).getByRole('button', { name: '我的', exact: true }).click();
+  await owner.getByRole('button', { name: /我的账号/ }).click();
+  await owner.getByRole('button', { name: '绑定找回邮箱', exact: true }).click();
+  await owner.getByLabel('当前密码', { exact: true }).fill(password);
+  await owner.getByLabel('邮箱', { exact: true }).fill('owner@example.test');
+  await owner.getByRole('button', { name: '获取验证码', exact: true }).click();
+  await owner.getByRole('button', { name: /秒后重发/ }).waitFor();
+  await owner.getByLabel('邮箱验证码', { exact: true }).fill(messages.at(-1).code);
+  await owner.getByRole('button', { name: '验证并绑定邮箱', exact: true }).click();
+  await owner.getByText('owner@example.test', { exact: true }).waitFor();
+  await nav(owner).getByRole('button', { name: '菜谱本', exact: true }).click();
   await newcomer.goto('http://localhost:4181');
   await newcomer.getByRole('button', { name: '注册账号', exact: true }).click();
   await newcomer.getByLabel('用户名', { exact: true }).fill('厨房小伙伴');
+  await newcomer.getByLabel('邮箱', { exact: true }).fill('cook@example.test');
+  await newcomer.getByRole('button', { name: '获取验证码', exact: true }).click();
+  await newcomer.getByRole('button', { name: /秒后重发/ }).waitFor();
+  assert.equal(await newcomer.getByRole('button', { name: /秒后重发/ }).isDisabled(), true);
+  assert.ok((await newcomer.getByLabel('邮箱验证码', { exact: true }).boundingBox()).width > 150, 'the resend button must leave enough space for six digits on mobile');
+  await newcomer.getByLabel('邮箱验证码', { exact: true }).fill(messages.at(-1).code);
   await newcomer.getByLabel('密码', { exact: true }).fill(newPassword);
   await newcomer.getByLabel('确认密码', { exact: true }).fill('different-password');
   await newcomer.getByRole('button', { name: '注册并登录' }).click();
@@ -58,6 +91,7 @@ try {
   await newcomer.setViewportSize({ width: 390, height: 700 });
   await newcomer.getByRole('button', { name: '注册并登录' }).click();
   await newcomer.getByRole('heading', { name: '我的账号', exact: true }).waitFor();
+  await newcomer.getByText('cook@example.test', { exact: true }).waitFor();
   const accountId = await newcomer.getByLabel('账号 ID', { exact: true }).inputValue();
   assert.match(accountId, /^usr_[a-f0-9]{32}$/);
   assert.equal(await newcomer.evaluate(() => document.documentElement.scrollWidth <= innerWidth), true);
@@ -123,6 +157,7 @@ try {
   assert.equal(await sibling.locator('#auth-root form').count(), 0, 'same-browser account switch must update the other tab');
   await newcomer.getByRole('button', { name: '退出', exact: true }).click();
   await newcomer.getByRole('button', { name: '忘记密码？', exact: true }).click();
+  await newcomer.getByRole('button', { name: '未绑定邮箱？联系管理员找回', exact: true }).click();
   await newcomer.getByLabel('账号', { exact: true }).fill(accountId);
   await newcomer.getByLabel('线下联系方式', { exact: true }).fill('浏览器测试线下渠道');
   await newcomer.getByLabel('备注（选填）', { exact: true }).fill('希望管理员帮助重置密码');
@@ -153,9 +188,33 @@ try {
   await newcomer.getByRole('button', { name: /我的账号/ }).click();
   await newcomer.getByLabel('账号 ID', { exact: true }).waitFor();
   assert.equal(await newcomer.getByLabel('账号 ID', { exact: true }).inputValue(), accountId);
+  await newcomer.getByRole('button', { name: '退出当前账号', exact: true }).click();
+  await newcomer.getByRole('button', { name: '忘记密码？', exact: true }).click();
+  await newcomer.getByLabel('账号', { exact: true }).fill(accountId);
+  await newcomer.getByLabel('邮箱', { exact: true }).fill('cook@example.test');
+  timeOffset += 61000; // Test server only: expire the email send cooldown.
+  await newcomer.getByRole('button', { name: '获取验证码', exact: true }).click();
+  await newcomer.getByRole('button', { name: /秒后重发/ }).waitFor();
+  const emailPassword = 'browser-email-recovered-password', correctCode = messages.at(-1).code;
+  await newcomer.getByLabel('邮箱验证码', { exact: true }).fill(correctCode === '000000' ? '111111' : '000000');
+  await newcomer.getByLabel('新密码', { exact: true }).fill(emailPassword);
+  await newcomer.getByLabel('确认新密码', { exact: true }).fill(emailPassword);
+  await newcomer.getByRole('button', { name: '验证并重置密码', exact: true }).click();
+  await newcomer.getByRole('alert').filter({ hasText: '验证码不正确' }).waitFor();
+  await newcomer.getByLabel('邮箱验证码', { exact: true }).fill(correctCode);
+  assert.equal(await newcomer.evaluate(() => document.documentElement.scrollWidth <= innerWidth), true);
+  await newcomer.screenshot({ path: resolve(output, 'mobile-email-recovery.png'), fullPage: true });
+  const resetResponse = newcomer.waitForResponse(response => response.url().endsWith('/api/account/email-recovery') && response.request().method() === 'POST');
+  await newcomer.getByRole('button', { name: '验证并重置密码', exact: true }).click();
+  const reset = await resetResponse;
+  assert.equal(reset.status(), 200, await reset.text());
+  await newcomer.getByRole('heading', { name: '密码已重置', exact: true }).waitFor();
+  assert.equal(await newcomer.locator('#app').evaluate(element => element.inert), true, 'reset must not automatically log in');
+  await newcomer.getByRole('button', { name: '返回登录', exact: true }).click();
+  await logIn(newcomer, accountId, emailPassword);
   assert.deepEqual(errors, []);
   await writeFile(resolve(output, 'account-verification.json'), JSON.stringify({ passed: true, registration: true, sharedEditing: true, independentFavorites: true, crossDevice: true, accountSwitch: true, legacyFavorites: true, offline: true }, null, 2));
-  console.log('Multi-account, empty login, and administrator password recovery browser checks passed.');
+  console.log('Multi-account, verified email registration, binding, email reset, and administrator recovery browser checks passed.');
 } finally {
-  await browser.close(); await new Promise(resolve => { child.once('exit', resolve); child.kill(); });
+  Date.now = realNow; await browser.close(); await new Promise(resolve => server.close(resolve));
 }

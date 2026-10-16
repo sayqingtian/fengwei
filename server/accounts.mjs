@@ -25,7 +25,7 @@ export async function requireUniqueWrites(store) {
   catch (error) { uniqueWriteChecks.delete(store); throw error; }
 }
 export const normalizeUsername = value => value.normalize('NFKC').trim().toLowerCase();
-export const publicUser = user => ({ id: user.id, loginId: user.id, displayName: user.displayName, createdAt: user.createdAt, legacy: !!user.legacy, role: user.role || 'viewer', canEdit: !!user.canEdit, ...(user.passwordChangedAt ? { passwordChangedAt: user.passwordChangedAt } : {}) });
+export const publicUser = user => ({ id: user.id, loginId: user.id, displayName: user.displayName, createdAt: user.createdAt, legacy: !!user.legacy, role: user.role || 'viewer', canEdit: !!user.canEdit, ...(user.emailVerifiedAt ? { email: user.email, emailVerifiedAt: user.emailVerifiedAt } : {}), ...(user.passwordChangedAt ? { passwordChangedAt: user.passwordChangedAt } : {}) });
 const uuid = value => typeof value === 'string' && /^[a-f0-9]{8}-[a-f0-9]{4}-4[a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/.test(value);
 
 export class Accounts {
@@ -80,10 +80,48 @@ export class Accounts {
     const read = key => snapshot ? snapshot.get(key) || null : this.store.get(key, { type: 'json', consistency: 'strong' });
     if (await read(`private/deleted-users/${id}.json`)) return null;
     const stored = await read(this.key(id));
-    if (stored) return this.withPassword(stored, snapshot);
+    if (stored) return this.withEmail(await this.withPassword(stored, snapshot), snapshot);
     const pending = await read(`private/registrations/${id}.json`);
     const claim = pending && (await this.currentNameClaim(pending.displayName)).claim;
-    return claim?.id === id ? this.withPassword(pending, snapshot) : null;
+    return claim?.id === id ? this.withEmail(await this.withPassword(pending, snapshot), snapshot) : null;
+  }
+  async withEmail(user, snapshot) {
+    if (!user || user.emailVerifiedAt) return user;
+    const key = `private/account-emails/${user.id}.json`;
+    const binding = snapshot ? snapshot.get(key) : await this.store.get(key, { type: 'json', consistency: 'strong' });
+    return binding ? { ...user, email: binding.email, emailVerifiedAt: binding.verifiedAt } : user;
+  }
+  async bindEmail(id, email, auditEntry) {
+    let user = await this.get(id);
+    if (!user && id === this.legacyId) user = await this.original();
+    if (!user) throw problem(404, 'ACCOUNT_NOT_FOUND', '账号不存在。');
+    if (user.email) {
+      if (user.email !== email) throw problem(409, 'EMAIL_ALREADY_BOUND', '账号已绑定邮箱，暂不支持在此更换。');
+      return user;
+    }
+    const binding = await this.reserve(`private/account-emails/${id}.json`, { userId: id, email, verifiedAt: new Date().toISOString(), ...(auditEntry ? { auditEntry } : {}) });
+    if (binding.userId !== id || binding.email !== email) throw problem(409, 'EMAIL_ALREADY_BOUND', '账号已在其他设备绑定邮箱，请刷新。');
+    return this.get(id);
+  }
+  async resetWithEmail(id, data, expectedVersion, challengeId, auditEntry) {
+    if (!uuid(data?.mutationId) || typeof data.newPassword !== 'string' || data.newPassword.length < 8 || data.newPassword.length > 128 || !data.newPassword.trim()) throw problem(400, 'INVALID_PASSWORD', '新密码需要 8～128 个字符。');
+    if (data.newPassword !== data.confirmPassword) throw problem(400, 'PASSWORD_MISMATCH', '两次输入的新密码不一致。');
+    const user = id === this.legacyId ? await this.original() : await this.get(id);
+    if (!user) throw problem(400, 'EMAIL_CODE_INVALID', '验证码不正确、已失效或已使用，请重新获取。');
+    const proofText = `fengwei-email-reset-v1:${JSON.stringify([challengeId, data.newPassword])}`;
+    if (user.passwordVersion === data.mutationId) {
+      if (!timingSafeEqual(await derive(proofText, user.salt), Buffer.from(user.passwordRequestHash, 'hex'))) throw problem(409, 'PASSWORD_CHANGE_CONFLICT', '同一次重置请求的内容发生变化，请重新获取验证码。');
+      return user;
+    }
+    if (user.passwordVersion !== expectedVersion) throw problem(409, 'PASSWORD_CHANGE_CONFLICT', '账号密码已变化，请重新获取验证码。');
+    if (timingSafeEqual(await derive(data.newPassword, user.salt), Buffer.from(user.passwordHash, 'hex'))) throw problem(400, 'PASSWORD_UNCHANGED', '新密码不能与当前密码相同。');
+    const salt = randomBytes(16).toString('hex');
+    const change = { userId: id, parentVersion: expectedVersion, version: data.mutationId, salt, passwordHash: (await derive(data.newPassword, salt)).toString('hex'), requestHash: (await derive(proofText, salt)).toString('hex'), emailChallengeId: challengeId, changedAt: new Date().toISOString(), ...(auditEntry ? { auditEntry } : {}) };
+    const saved = await this.reserve(this.passwordKey(id, expectedVersion), change);
+    if (saved.version !== data.mutationId || saved.emailChallengeId !== challengeId || !timingSafeEqual(await derive(proofText, saved.salt), Buffer.from(saved.requestHash, 'hex'))) throw problem(409, 'PASSWORD_CHANGE_CONFLICT', '密码已在其他设备修改，请重新获取验证码。');
+    try { await this.store.setJSON(`private/password-heads/${id}.json`, { parentVersion: expectedVersion }, { cacheControl: 'no-store' }); }
+    catch (error) { console.error('Fengwei email reset head unavailable:', error.code || error.name); }
+    return this.get(id);
   }
   async list() {
     const { blobs } = await this.store.list({ prefix: 'private/users/', consistency: 'strong' });
@@ -195,7 +233,7 @@ export class Accounts {
     if (user.passwordVersion !== change.version) throw problem(409, 'PASSWORD_CHANGE_CONFLICT', '密码已在其他设备再次修改，请使用最新密码重新登录。');
     return user;
   }
-  async register(data) {
+  async register(data, verifiedEmail) {
     if (!data || typeof data !== 'object' || Array.isArray(data)) throw problem(400, 'INVALID_REGISTRATION', '注册请求不完整，请重新打开注册页面。');
     let { displayName, password, registrationId } = data;
     if (typeof displayName !== 'string' || !displayName.trim() || displayName.trim().length > 30) throw problem(400, 'INVALID_DISPLAY_NAME', '昵称需要 1～30 个字符。');
@@ -210,7 +248,7 @@ export class Accounts {
     const existing = await this.get(id);
     if (existing) {
       const derived = await derive(password, existing.salt);
-      if (normalizeUsername(existing.displayName) !== normalizeUsername(displayName) || !timingSafeEqual(derived, Buffer.from(existing.passwordHash, 'hex'))) throw problem(409, 'REGISTRATION_CONFLICT', '此注册请求已使用，请重新打开注册页面。');
+      if (normalizeUsername(existing.displayName) !== normalizeUsername(displayName) || (verifiedEmail && existing.email !== verifiedEmail) || !timingSafeEqual(derived, Buffer.from(existing.passwordHash, 'hex'))) throw problem(409, 'REGISTRATION_CONFLICT', '此注册请求已使用，请重新打开注册页面。');
       return existing;
     }
     const name = normalizeUsername(displayName);
@@ -220,10 +258,10 @@ export class Accounts {
     await requireUniqueWrites(this.store);
     const salt = randomBytes(16).toString('hex');
     const passwordHash = (await derive(password, salt)).toString('hex');
-    const candidate = { id, displayName, registrationId, salt, passwordHash, createdAt: new Date().toISOString(), legacy: false };
+    const candidate = { id, displayName, registrationId, salt, passwordHash, createdAt: new Date().toISOString(), legacy: false, ...(verifiedEmail ? { email: verifiedEmail, emailVerifiedAt: new Date().toISOString() } : {}) };
     const user = await this.reserve(`private/registrations/${id}.json`, candidate);
     const derived = await derive(password, user.salt);
-    if (normalizeUsername(user.displayName) !== name || !timingSafeEqual(derived, Buffer.from(user.passwordHash, 'hex'))) throw problem(409, 'REGISTRATION_CONFLICT', '此注册请求已使用，请重新打开注册页面。');
+    if (normalizeUsername(user.displayName) !== name || (verifiedEmail && user.email !== verifiedEmail) || !timingSafeEqual(derived, Buffer.from(user.passwordHash, 'hex'))) throw problem(409, 'REGISTRATION_CONFLICT', '此注册请求已使用，请重新打开注册页面。');
     const nameClaim = await this.currentNameClaim(name);
     const claim = await this.reserve(nameClaim.key, { id: user.id });
     if (claim?.id !== user.id) throw problem(409, 'USERNAME_TAKEN', '这个用户名已被注册，请使用其他用户名。');

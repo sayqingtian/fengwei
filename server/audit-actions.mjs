@@ -1,4 +1,5 @@
 export const AUDIT_ACTIONS = {
+  'account.email.code': '发送邮箱验证码', 'account.email.bind': '绑定找回邮箱', 'account.email.reset': '邮箱重置密码',
   'account.register': '注册账号', 'account.login': '登录', 'account.logout': '退出登录',
   'account.password': '修改密码', 'account.delete': '删除账号', 'audit.export': '导出操作日志', 'photo.optimize': '优化图片',
   'account.recovery.request': '申请找回密码', 'account.recovery.reset': '管理员重置密码', 'account.recovery.reject': '拒绝找回申请',

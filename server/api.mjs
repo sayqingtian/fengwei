@@ -13,6 +13,7 @@ import { PasswordRecovery, RECOVERY_MESSAGE } from './password-recovery.mjs';
 import { requestStore } from './request-store.mjs';
 import { CookingCheckins } from './checkins.mjs';
 import { RateLimits } from './rate-limit.mjs';
+import { EmailAuth, createResendMailer } from './email-auth.mjs';
 
 const publicEvent = (event, favorite) => event && ({ id: event.id, revision: event.revision, deleted: event.deleted, photoHash: event.photoHash, recipe: event.recipe ? { ...event.recipe, favorite: !!favorite } : null, savedAt: event.savedAt, conflictCount: event.conflictCount || 1 });
 class HttpError extends Error { constructor(status, code, message) { super(message); Object.assign(this, { status, code }); } }
@@ -37,7 +38,7 @@ function auditDates(params) {
   if (dates.from && dates.to && dates.from >= dates.to) fail(400, 'INVALID_FILTER', '结束日期不能早于开始日期。');
   return dates;
 }
-export function createApi({ database, password }) {
+export function createApi({ database, password, mailer }) {
   const limits = new RateLimits(database.store);
   const store = requestStore(database.store);
   database = new RecipeDatabase(store);
@@ -46,6 +47,10 @@ export function createApi({ database, password }) {
   const audit = new AuditLog(database.store), permissions = auth.permissions;
   const checkins = new CookingCheckins(database.store);
   const recovery = new PasswordRecovery(auth.accounts, permissions.adminId);
+  const emailAuth = new EmailAuth(auth.accounts, limits, mailer || createResendMailer());
+  // The pre-existing synthetic-password injection keeps isolated legacy test
+  // fixtures usable. Production entry points never inject a test password.
+  const emailRequired = password === undefined || mailer !== undefined;
   return (request, context = {}) => store.run(async () => {
     const address = context.clientIp ?? request.headers.get('x-real-ip') ?? 'local';
     const started = performance.now();
@@ -100,12 +105,20 @@ export function createApi({ database, password }) {
         await record('success');
         return reply({ ok: true, user: actor }, 200, { 'Set-Cookie': sessionCookie(request, token) });
       }
+      if (route === 'email/code' && method === 'POST') {
+        action = 'account.email.code'; target = '发送邮箱验证码';
+        const data = await body(request, 4096); operationId = data?.requestId;
+        const result = await emailAuth.request(data, address, data?.purpose === 'bind' ? await auth.verify(request) : null);
+        await record('success');
+        return reply(result);
+      }
       if (route === 'register' && method === 'POST') {
         action = 'account.register';
         const data = await body(request, 4096);
         actor = { displayName: typeof data?.displayName === 'string' ? data.displayName.trim().slice(0, 30) : '未登录用户' };
         await limits.consume('register', address, 20, 3600000, 'REGISTER_LATER', '注册次数较多，请稍后再试。');
-        const user = await auth.accounts.register(data);
+        const verified = emailRequired ? await emailAuth.verify(data, 'register', ['register', data?.registrationId, data?.displayName, data?.password]) : null;
+        const user = await auth.accounts.register(data, verified?.email);
         actor = publicUser(await permissions.profile(user)); operationId = data.registrationId;
         await record('success');
         return reply({ ok: true, user: actor }, 201, { 'Set-Cookie': sessionCookie(request, await auth.issue(user)) });
@@ -116,6 +129,20 @@ export function createApi({ database, password }) {
         const data = await body(request, 4096); operationId = data?.requestId;
         await recovery.request(data, receipt()); await record('success');
         return reply({ ok: true, message: RECOVERY_MESSAGE });
+      }
+      if (route === 'account/email-recovery' && method === 'POST') {
+        action = 'account.email.reset'; target = '邮箱验证重置密码';
+        const data = await body(request, 4096); operationId = data?.mutationId;
+        await limits.consume('email-reset-source', address, 10, 900000, 'EMAIL_TRY_LATER', '找回尝试较多，请 15 分钟后再试。');
+        if (!/^[a-f0-9]{8}-[a-f0-9]{4}-4[a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/.test(data?.mutationId || '')) fail(400, 'INVALID_EMAIL_REQUEST', '请求不完整，请重新打开找回页面。');
+        if (typeof data?.newPassword !== 'string' || data.newPassword.length < 8 || data.newPassword.length > 128 || !data.newPassword.trim() || data.newPassword !== data.confirmPassword) fail(400, 'INVALID_PASSWORD', '请填写一致的新密码，长度为 8～128 个字符。');
+        const account = await emailAuth.account(data?.username);
+        const verified = await emailAuth.verify(data, 'recover', ['recover', data?.username, data?.mutationId, data?.newPassword], account?.id || null);
+        if (!account || account.id !== verified.userId || account.email !== verified.email || !account.emailVerifiedAt) fail(400, 'EMAIL_CODE_INVALID', '验证码不正确、已失效或已使用，请重新获取。');
+        actor = publicUser(account);
+        await auth.accounts.resetWithEmail(account.id, data, verified.credentialVersion, verified.id, receipt());
+        await record('success');
+        return reply({ ok: true, message: '密码已重置，请使用新密码登录。' });
       }
       const session = await auth.verify(request);
       if (route === 'logout' && method === 'POST') {
@@ -133,6 +160,20 @@ export function createApi({ database, password }) {
       const user = session.user;
       actor = user;
       if (route === 'me' && method === 'GET') return reply({ user });
+      if (route === 'account/email' && method === 'POST') {
+        action = 'account.email.bind'; target = '绑定找回邮箱';
+        const data = await body(request, 4096); operationId = data?.mutationId;
+        if (data?.expectedUserId !== user.id) fail(409, 'ACCOUNT_CHANGED', '账号已切换，请重新登录后绑定。');
+        if (!/^[a-f0-9]{8}-[a-f0-9]{4}-4[a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/.test(data?.mutationId || '')) fail(400, 'INVALID_EMAIL_REQUEST', '请求不完整，请重新打开绑定页面。');
+        await limits.consume('email-bind', user.id, 10, 900000, 'EMAIL_TRY_LATER', '绑定尝试较多，请稍后再试。');
+        const current = await auth.accounts.authenticate(user.id, data.currentPassword);
+        if (!current || current.passwordVersion !== session.account.passwordVersion) fail(400, 'CURRENT_PASSWORD_INCORRECT', '当前密码不正确，请重新输入。');
+        const verified = await emailAuth.verify(data, 'bind', ['bind', user.id, data.mutationId, data.currentPassword], user.id);
+        if (verified.userId !== user.id || verified.credentialVersion !== current.passwordVersion) fail(400, 'EMAIL_CODE_INVALID', '验证码已失效，请重新获取。');
+        const account = await auth.accounts.bindEmail(user.id, verified.email, receipt());
+        await record('success');
+        return reply({ userId: user.id, user: publicUser(await permissions.profile(account)) });
+      }
       if (route === 'checkins' && method === 'GET') return reply({ userId: user.id, ...await checkins.list(user.id, url.searchParams.get('cursor') || '') });
       if (route.startsWith('checkins/') && method === 'DELETE') {
         const data = await body(request, 2048), id = route.slice(9);

@@ -101,7 +101,7 @@ export async function createRemoteStore(local, { requestTimeout = 25000 } = {}) 
       if (!response.ok) {
         if (response.status === 401) {
           await forget();
-          if (!['login', 'register'].includes(path)) globalThis.dispatchEvent?.(new Event('fengwei:login-required'));
+          if (!['login', 'register', 'email/code', 'account/email-recovery'].includes(path)) globalThis.dispatchEvent?.(new Event('fengwei:login-required'));
         }
         if (data.code === 'ACCOUNT_CHANGED') {
           await forget(); globalThis.dispatchEvent?.(new Event('fengwei:login-required'));
@@ -425,13 +425,19 @@ export async function createRemoteStore(local, { requestTimeout = 25000 } = {}) 
       accountEpoch++;
       await acceptUser(data.user); offline = false; authenticated = true;
     },
-    async register(displayName, password, registrationId) {
+    async register(displayName, password, registrationId, verification = {}) {
       if (pendingLogout) await finishLogout();
-      const data = await request('register', { method: 'POST', value: { displayName, password, registrationId } });
+      const data = await request('register', { method: 'POST', value: { displayName, password, registrationId, ...verification } });
       accountEpoch++;
       await acceptUser(data.user); offline = false; authenticated = true;
     },
     async requestPasswordRecovery(value) { ensureOnline(); return request('account/recovery', { method: 'POST', value }); },
+    async sendEmailCode(value) { ensureOnline(); return request('email/code', { method: 'POST', value }); },
+    async recoverWithEmail(value) { ensureOnline(); return request('account/email-recovery', { method: 'POST', value }); },
+    async bindEmail(value) {
+      ensureOnline(); const data = await request('account/email', { method: 'POST', value: { ...value, expectedUserId: user?.id } });
+      await sameAccount(data); await acceptUser(data.user); await persist(); return user;
+    },
     async passwordRecoveries() { ensureOnline(); const data = await request('admin/password-recovery'); await sameAccount(data); return data; },
     async decidePasswordRecovery(value) {
       ensureOnline(); const data = await request('admin/password-recovery/decision', { method: 'POST', value: { ...value, expectedUserId: user?.id } });
