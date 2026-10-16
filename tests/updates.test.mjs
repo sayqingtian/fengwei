@@ -11,7 +11,7 @@ function worker({ legacy = false, failAsset = false } = {}) {
   const handlers = {}, cached = new Map(), fetched = [], removed = []; let skips = 0;
   const self = { location: new URL('https://example.test/cook/sw.js'), addEventListener: (name, handle) => { handlers[name] = handle; }, skipWaiting: async () => { skips++; }, clients: { claim: async () => {} } };
   const caches = { keys: async () => legacy ? ['fengwei-shell-v12'] : ['fengwei-shell-previous'], open: async () => ({ put: async (url, res) => cached.set(url, await res.text()), match: async () => undefined }), delete: async key => { removed.push(key); } };
-  vm.runInNewContext(sw, { self, caches, URL, Response, fetch: async (url, options) => { fetched.push({ url: new URL(url), options }); return new Response('shell', { status: failAsset && String(url).includes('styles.css') ? 503 : 200 }); } });
+  vm.runInNewContext(sw, { self, caches, URL, Response, AbortController, setTimeout, clearTimeout, fetch: async (url, options) => { fetched.push({ url: new URL(url), options }); return new Response('shell', { status: failAsset && String(url).includes('styles.css') ? 503 : 200 }); } });
   const run = (name, data = {}) => { let promise; handlers[name]({ ...data, waitUntil: value => { promise = value; } }); return promise; };
   return { run, cached, fetched, removed, get skips() { return skips; } };
 }

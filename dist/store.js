@@ -1,4 +1,5 @@
 import { createRemoteStore } from './sync.js';
+import { deadline } from './runtime.js';
 export const CATEGORIES = ['家常菜', '下饭菜', '汤羹', '早餐', '烘焙', '甜点', '饮品', '其他'];
 export const BACKUP_FORMAT = 'fengwei-recipes';
 export const BACKUP_VERSION = 1;
@@ -115,8 +116,9 @@ export function filterRecipes(recipes, { query = '', category = '全部', favori
   }).sort((a, b) => sort === 'name' ? a.title.localeCompare(b.title, 'zh-CN') : Date.parse(b.updatedAt) - Date.parse(a.updatedAt));
 }
 
-export async function openLocalStore() {
-  const db = await new Promise((resolve, reject) => {
+export async function openLocalStore({ timeout = 5000 } = {}) {
+  let expired = false;
+  const db = await deadline(new Promise((resolve, reject) => {
     if (!globalThis.indexedDB) { reject(new Error('当前浏览器无法保存菜谱，请使用 Safari 普通浏览模式')); return; }
     const request = indexedDB.open('shiwei-private-recipes', 1);
     request.onupgradeneeded = () => {
@@ -124,21 +126,22 @@ export async function openLocalStore() {
       database.createObjectStore('recipes', { keyPath: 'id' });
       database.createObjectStore('settings');
     };
-    request.onsuccess = () => resolve(request.result);
+    request.onsuccess = () => { if (expired) request.result.close(); else resolve(request.result); };
     request.onerror = () => reject(request.error);
-    request.onblocked = () => reject(new Error('请关闭其他菜谱页面后重试'));
-  });
+    request.onblocked = () => { expired = true; reject(new Error('请关闭其他菜谱页面后重试')); };
+  }), timeout, '手机本机存储响应超时，请重新打开后重试。', () => { expired = true; });
   db.onversionchange = () => db.close();
   function operation(storeName, mode, execute) {
-    return new Promise((resolve, reject) => {
-      const transaction = db.transaction(storeName, mode);
+    let transaction;
+    return deadline(new Promise((resolve, reject) => {
+      transaction = db.transaction(storeName, mode);
       let result;
       transaction.oncomplete = () => resolve(result);
       transaction.onerror = () => reject(transaction.error || new Error('保存失败，请重试'));
       transaction.onabort = () => reject(transaction.error || new Error('保存已中止'));
       try { execute(transaction.objectStore(storeName), value => { result = value; }); }
       catch (error) { transaction.abort(); reject(error); }
-    });
+    }), timeout, '手机本机存储响应超时，本次操作尚未确认。请重新打开后重试。', () => transaction?.abort());
   }
   return {
     all: () => operation('recipes', 'readonly', (store, set) => { const req = store.getAll(); req.onsuccess = () => set(req.result); }),

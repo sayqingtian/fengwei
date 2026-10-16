@@ -1,4 +1,5 @@
 import { APP_VERSION } from './version.js';
+import { deadline } from './runtime.js';
 
 export function createUpdater({ changed = () => {}, reload = () => location.reload() } = {}) {
   let registration, starting, running, latest = '', status = '', busy = false, lastCheck = 0;
@@ -10,7 +11,7 @@ export function createUpdater({ changed = () => {}, reload = () => location.relo
   }
   async function start() {
     if (!supported) return null;
-    if (!starting) starting = navigator.serviceWorker.register('./sw.js', { scope: './', updateViaCache: 'none' }).then(value => {
+    if (!starting) starting = deadline(navigator.serviceWorker.register('./sw.js', { scope: './', updateViaCache: 'none' }), 15000, '更新连接超时，请重试。').then(value => {
       registration = value; watch(value.installing);
       value.addEventListener('updatefound', () => watch(value.installing));
       return value;
@@ -25,12 +26,15 @@ export function createUpdater({ changed = () => {}, reload = () => location.relo
     running = (async () => {
       try {
         const url = new URL('./version.json', import.meta.url); url.searchParams.set('check', Date.now());
-        const response = await fetch(url, { cache: 'no-store', signal: AbortSignal.timeout(15000) });
-        if (!response.ok) throw new Error('版本信息暂时不可用，请稍后重试。');
-        const info = await response.json();
+        const controller = new AbortController();
+        const info = await deadline((async () => {
+          const response = await fetch(url, { cache: 'no-store', signal: controller.signal });
+          if (!response.ok) throw new Error('版本信息暂时不可用，请稍后重试。');
+          return response.json();
+        })(), 15000, '检查超时，请稍后重试。', () => controller.abort());
         if (typeof info.version !== 'string' || !/^\d+\.\d+\.\d+(?:\+\d+)?$/.test(info.version)) throw new Error('版本信息暂时不可用，请稍后重试。');
         latest = info.version;
-        const reg = await start(); if (reg) await reg.update();
+        const reg = await start(); if (reg) await deadline(reg.update(), 15000, '检查超时，请稍后重试。');
         status = latest !== APP_VERSION || reg?.waiting ? '发现新版本，可以更新。' : '当前已是最新版本。';
       } catch (error) { if (manual) status = error.name === 'TimeoutError' ? '检查超时，请稍后重试。' : '检查更新失败，请确认网络后重试。'; }
       finally { busy = false; running = null; emit(); }
@@ -43,7 +47,7 @@ export function createUpdater({ changed = () => {}, reload = () => location.relo
     try {
       const reg = await start();
       if (!reg) { reload(); return; }
-      await reg.update();
+      await deadline(reg.update(), 15000, '下载更新超时，请重试。');
       if (reg.installing) await new Promise((resolve, reject) => {
         const worker = reg.installing, timer = setTimeout(() => finish(new Error('下载更新超时，请重试。')), 25000);
         function finish(error) { clearTimeout(timer); worker.removeEventListener('statechange', change); error ? reject(error) : resolve(); }

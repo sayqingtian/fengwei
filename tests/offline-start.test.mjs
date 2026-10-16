@@ -4,11 +4,11 @@ import { readFile } from 'node:fs/promises';
 import vm from 'node:vm';
 
 const source = await readFile(new URL('../dist/sw.js', import.meta.url), 'utf8');
-function worker(cached, fetch) {
+function worker(cached, fetch, open = async () => ({ match: async () => cached })) {
   const handlers = {};
   const context = {
     self: { location: new URL('https://example.test/recipes/sw.js'), addEventListener: (type, handler) => { handlers[type] = handler; }, skipWaiting: async () => {}, clients: { claim: async () => {} } },
-    caches: { open: async () => ({ match: async () => cached }) }, fetch, URL, Response,
+    caches: { open }, fetch, URL, Response, setTimeout, clearTimeout,
   };
   vm.runInNewContext(source, context);
   return request => { let response; handlers.fetch({ request, respondWith: value => { response = Promise.resolve(value); } }); return response; };
@@ -36,4 +36,14 @@ test('an uncached navigation still retrieves the initial application from the ho
   const request = worker(undefined, async () => { serverRequests++; return new Response('initial shell'); });
   assert.equal(await (await request(navigation)).text(), 'initial shell');
   assert.equal(serverRequests, 1);
+});
+
+test('an unavailable or stalled mobile cache falls back to the network for navigation and modules', async () => {
+  for (const open of [async () => { throw new Error('Storage unavailable'); }, () => new Promise(() => {})]) {
+    let requests = 0;
+    const request = worker(undefined, async () => { requests++; return new Response('fresh shell'); }, open);
+    const responses = await Promise.all([request(navigation), request({ url: 'https://example.test/recipes/app.js', method: 'GET', mode: 'cors' })]);
+    assert.deepEqual(await Promise.all(responses.map(response => response.text())), ['fresh shell', 'fresh shell']);
+    assert.equal(requests, 2);
+  }
 });

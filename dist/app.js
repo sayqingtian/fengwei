@@ -287,6 +287,7 @@ function render() {
 }
 
 function syncBar() {
+  if (!db?.authenticated) return `<div class="sync-bar" role="status"><span>${icon('lock')}${recipeLoading ? '正在恢复登录，请稍候…' : '登录尚未恢复，请重新加载或登录。'}</span>${recipeLoading ? '' : '<button class="text-button" data-action="auth-login">登录账号</button>'}</div>${queueNotice()}`;
   return `${db?.cacheWarning ? '<div class="sync-warning">手机本机存储暂时不可用，未同步内容请勿清理。请释放存储空间或允许网站保存数据。</div>' : ''}<div class="sync-bar"><span>${icon((db?.readOnly || navigator.onLine === false) ? 'wifi' : 'cloud')}${(db?.readOnly || navigator.onLine === false) ? '离线预览 · 修改需要联网' : `已登录：${esc(db?.user?.displayName || '')} · ${roleName(db?.user)}`}</span><div><button class="text-button" data-action="sync">同步菜谱</button><button class="text-button" data-action="logout">退出</button></div></div>${recipeLoading ? '<p class="sync-loading" role="status"><span class="loading-ring" aria-hidden="true"></span>正在加载最新菜谱与照片…</p>' : ''}${queueNotice()}${db?.conflicts.length ? `<div class="sync-warning">检测到同时编辑的版本，内容均已保留。<button class="text-button" data-action="history" data-id="${esc(db.conflicts[0])}">查看历史版本</button></div>` : ''}`;
 }
 
@@ -397,7 +398,7 @@ function recipePage() {
 }
 
 function renderResults() {
-  if (recipeLoading && !recipes.length) { $('#results').innerHTML = '<div class="recipe-loading" role="status"><span class="loading-ring" aria-hidden="true"></span><h3>已登录，正在加载菜谱…</h3><p id="recipe-load-stage">正在读取共享菜谱和照片，请稍候。</p></div>'; return; }
+  if (recipeLoading && !recipes.length) { $('#results').innerHTML = `<div class="recipe-loading" role="status"><span class="loading-ring" aria-hidden="true"></span><h3>${db?.authenticated ? '已登录，正在加载菜谱…' : '正在恢复登录…'}</h3><p id="recipe-load-stage">正在读取共享菜谱和照片，请稍候。</p></div>`; return; }
   if (recipeLoadError && !recipes.length) { $('#results').innerHTML = `<div class="recipe-loading" role="alert"><h3>菜谱暂时没有加载完成</h3><p>${esc(recipeLoadError)}</p><button class="button primary" data-action="sync">重新加载</button></div>`; return; }
 
   const result = filterRecipes(recipes, { query, category, favorites: page === 'favorites', sort });
@@ -431,7 +432,14 @@ async function refresh() {
   try {
     const loaded = await db.all();
     if (generation !== refreshGeneration) return;
-    recipes = loaded; legacyCount = (await db.legacy().catch(() => [])).length; lastBackup = await db.setting('lastBackup');
+    recipes = loaded;
+    // Optional local preferences must not delay the first usable recipe screen.
+    const owner = db.user?.id;
+    Promise.all([db.legacy().catch(() => []), db.setting('lastBackup')]).then(([legacy, backup]) => {
+      if (generation !== refreshGeneration || owner !== db.user?.id) return;
+      legacyCount = legacy.length; lastBackup = backup;
+      if (page === 'backup') render();
+    }).catch(() => {});
   } catch (error) { if (generation === refreshGeneration) { recipeLoadError = errorText(error); throw error; } }
   finally { if (generation === refreshGeneration) { recipeLoading = false; render(); } }
 }
@@ -1137,7 +1145,14 @@ async function init() {
   if ('serviceWorker' in navigator) navigator.serviceWorker.getRegistration('./').then(existing => { if (existing?.active) { offlineReady = true; if (page === 'backup') render(); } }).catch(() => {});
   updater.check().catch(() => {});
   try {
-    db = await openStore(); recipes = await db.all(); lastBackup = await db.setting('lastBackup'); legacyCount = (await db.legacy().catch(() => [])).length; render();
+    window.dispatchEvent(new CustomEvent('fengwei:startup-phase', { detail: '正在读取本机菜谱…' }));
+    db = await openStore();
+    recipes = db.current(); recipeLoading = true; render();
+    window.dispatchEvent(new Event('fengwei:ready'));
+    refresh().catch(error => {
+      if (error.status === 401) { if (!$('#auth-root').hasChildNodes()) showLogin(); }
+      else toast(errorText(error));
+    });
   } catch (error) {
     if (error.status === 401) showLogin();
     else {

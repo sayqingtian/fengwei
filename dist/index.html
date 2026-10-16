@@ -12,17 +12,71 @@
   <link rel="manifest" href="./manifest.webmanifest">
   <link rel="apple-touch-icon" href="./icons/apple-touch-icon.png">
   <link rel="icon" href="./icons/icon.svg" type="image/svg+xml">
-  <link rel="stylesheet" href="./styles.css">
+  <style>
+    html,body{margin:0;background:#faf8f2;color:#315947;font-family:system-ui,sans-serif;color-scheme:light}
+    .boot{min-height:100vh;min-height:100dvh;box-sizing:border-box;padding:28px;display:flex;flex-direction:column;align-items:center;justify-content:center;text-align:center}
+    .boot-mark{font-family:serif;font-size:40px;letter-spacing:5px}.boot p{font-size:14px;line-height:1.8;color:#6b7464}
+    .boot-actions{display:flex;flex-wrap:wrap;gap:12px;justify-content:center}.boot-actions button{font:inherit;padding:12px 18px;border:1px solid #315947;border-radius:10px;background:#faf8f2;color:#315947;min-height:44px}
+    .boot-actions button:disabled{opacity:.5}[hidden]{display:none!important}
+  </style>
+  <link id="app-styles" rel="stylesheet" href="./styles.css" media="print" onload="this.media='all'">
   <title>峰味 · 共享菜谱本</title>
 </head>
 <body>
-  <div id="app"><div class="boot"><span class="boot-mark">峰味</span><p>翻开你的菜谱本…</p></div></div>
+  <div id="app"><div class="boot" id="startup" role="status"><span class="boot-mark">峰味</span><p id="startup-status">正在打开菜谱本…</p><div class="boot-actions" id="startup-actions" hidden><button id="startup-retry" type="button">重新打开</button><button id="startup-update" type="button">更新并重新打开</button></div></div></div>
   <div id="modal-root"></div>
   <div id="confirm-root"></div>
   <div id="auth-root"></div>
   <div id="update-root" aria-live="polite"></div>
   <div id="toast" role="status" aria-live="polite"></div>
   <noscript>请开启 JavaScript 后使用峰味菜谱本。</noscript>
-  <script type="module" src="./app.js"></script>
+  <script>
+    // This recovery entry has no module or storage dependency, so a failed
+    // module download cannot leave the installed app on its welcome screen.
+    (function () {
+      var boot = document.getElementById('startup'), status = document.getElementById('startup-status');
+      var actions = document.getElementById('startup-actions'), updating = false;
+      function problem(message) { if (boot.isConnected) { status.textContent = message; actions.hidden = false; } }
+      var timer = setTimeout(function () { problem('启动比平时慢，可以重新打开或更新应用。你的本机内容会保留。'); }, 8000);
+      window.addEventListener('fengwei:ready', function () { clearTimeout(timer); });
+      window.addEventListener('fengwei:startup-phase', function (event) { if (boot.isConnected) status.textContent = event.detail; });
+      document.getElementById('startup-retry').onclick = function () { location.reload(); };
+      function bounded(promise, milliseconds) {
+        return new Promise(function (resolve, reject) {
+          var timeout = setTimeout(function () { reject(new Error('更新连接超时，请确认网络后重试。')); }, milliseconds);
+          Promise.resolve(promise).then(function (value) { clearTimeout(timeout); resolve(value); }, function (error) { clearTimeout(timeout); reject(error); });
+        });
+      }
+      document.getElementById('startup-update').onclick = async function () {
+        if (updating) return;
+        updating = true; this.disabled = true; clearTimeout(timer); problem('正在获取新版本，请稍候…');
+        try {
+          if (!('serviceWorker' in navigator)) { location.reload(); return; }
+          var registration = await bounded(navigator.serviceWorker.getRegistration('./'), 5000);
+          if (!registration) registration = await bounded(navigator.serviceWorker.register('./sw.js', { scope: './', updateViaCache: 'none' }), 15000);
+          await bounded(registration.update(), 15000);
+          if (registration.installing) await bounded(new Promise(function (resolve, reject) {
+            var worker = registration.installing;
+            function changed() {
+              if (worker.state === 'installed' || worker.state === 'activated' || worker.state === 'redundant') {
+                worker.removeEventListener('statechange', changed);
+                if (worker.state === 'redundant') reject(new Error('新版本下载未完成，请重试。')); else resolve();
+              }
+            }
+            worker.addEventListener('statechange', changed); changed();
+          }), 25000);
+          if (registration.waiting) await bounded(new Promise(function (resolve) {
+            function changed() { navigator.serviceWorker.removeEventListener('controllerchange', changed); resolve(); }
+            navigator.serviceWorker.addEventListener('controllerchange', changed, { once: true });
+            registration.waiting.postMessage({ type: 'SKIP_WAITING' });
+            registration.waiting.postMessage({ type: 'ACTIVATE_UPDATE' });
+          }), 12000);
+          location.reload();
+        } catch (error) { problem(error.message || '更新失败，请确认网络后重试。'); }
+        finally { updating = false; this.disabled = false; }
+      };
+      import('./app.js').catch(function () { clearTimeout(timer); problem('应用文件加载未完成，请联网后点击“更新并重新打开”。'); });
+    }());
+  </script>
 </body>
 </html>

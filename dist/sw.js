@@ -1,17 +1,30 @@
-const CACHE = 'fengwei-shell-v27';
-const VERSION = '3.1.4';
-const ASSETS = ['./', './index.html', './styles.css', './app.js', './navigation.js', './store.js', './sync.js', './outbox.js', './my.js', './recovery.js', './photo.js', './photo-wire.js', './photos-page.js', './backup.js', './full-backup.js', './drafts.js', './updates.js', './version.js', './manifest.webmanifest', './icons/icon.svg', './icons/icon-192.png', './icons/icon-512.png', './icons/apple-touch-icon.png', './update.js', './checkins.js'];
+const CACHE = 'fengwei-shell-v28';
+const VERSION = '3.1.5';
+const ASSETS = ['./', './index.html', './styles.css', './app.js', './navigation.js', './store.js', './sync.js', './outbox.js', './my.js', './recovery.js', './photo.js', './photo-wire.js', './photos-page.js', './backup.js', './full-backup.js', './drafts.js', './updates.js', './version.js', './manifest.webmanifest', './icons/icon.svg', './icons/icon-192.png', './icons/icon-512.png', './icons/apple-touch-icon.png', './update.js', './checkins.js', './runtime.js'];
+function limit(promise, milliseconds, expired = () => {}) {
+  let timer;
+  return Promise.race([promise, new Promise((_, reject) => { timer = setTimeout(() => { reject(new Error('Application storage or network timed out')); expired(); }, milliseconds); })]).finally(() => clearTimeout(timer));
+}
+async function cached(key) {
+  // A stalled Cache API in a resumed mobile process must not block navigation
+  // or module loading. Keep its contents and try the network after this budget.
+  try { return await limit(caches.open(CACHE).then(cache => cache.match(key)), 1500); }
+  catch { return null; }
+}
 self.addEventListener('install', event => {
   event.waitUntil((async () => {
     const legacy = (await caches.keys()).some(key => /^fengwei-shell-v(?:[1-9]|1[0-2])$/.test(key) || key.startsWith('shiwei-shell-'));
     // Fetch a complete new shell without reusing a stale HTTP or CDN asset.
     const assets = await Promise.all(ASSETS.map(async asset => {
       const url = new URL(asset, self.location); url.searchParams.set('__fw_shell', CACHE);
-      const response = await fetch(url, { cache: 'reload' });
-      if (!response.ok) throw new Error('Incomplete application update');
+      const controller = new AbortController();
       // Consume each body immediately: older workers can proxy these downloads
       // through a limited stream pool, which stalls if all bodies wait for headers.
-      const complete = new Response(await response.arrayBuffer(), { status: response.status, headers: response.headers });
+      const complete = await limit((async () => {
+        const response = await fetch(url, { cache: 'reload', signal: controller.signal });
+        if (!response.ok) throw new Error('Incomplete application update');
+        return new Response(await response.arrayBuffer(), { status: response.status, headers: response.headers });
+      })(), 25000, () => controller.abort());
       return [new URL(asset, self.location).href, complete];
     }));
     const cache = await caches.open(CACHE);
@@ -42,8 +55,8 @@ self.addEventListener('fetch', event => {
     // Open the cached interface immediately; private API responses are never cached.
     // The installed shell remains available even when the
     // device has a network connection that cannot reach the hosting domain.
-    event.respondWith(caches.open(CACHE).then(cache => cache.match(new URL('./index.html', self.location).href)).then(cached => cached || fetch(event.request).catch(() => Response.error())));
+    event.respondWith(cached(new URL('./index.html', self.location).href).then(saved => saved || fetch(event.request).catch(() => Response.error())));
   } else {
-    event.respondWith(caches.open(CACHE).then(cache => cache.match(event.request)).then(cached => cached || fetch(event.request)));
+    event.respondWith(cached(event.request).then(saved => saved || fetch(event.request)));
   }
 });

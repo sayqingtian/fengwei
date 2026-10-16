@@ -222,7 +222,8 @@ try {
   if (await page.getByRole('button', { name: '退出并清理', exact: true }).count()) await page.getByRole('button', { name: '退出并清理', exact: true }).click();
   await page.getByRole('button', { name: '打开菜谱本' }).waitFor();
   await context.setOffline(true); await page.reload();
-  await page.getByRole('heading', { name: '菜谱本暂时打不开' }).waitFor();
+  await page.getByRole('heading', { name: '菜谱暂时没有加载完成' }).waitFor();
+  await page.getByRole('button', { name: '重新加载', exact: true }).waitFor();
   assert.equal(await page.locator('.recipe-card').count(), 0, 'logout clears cached private server recipes');
   await second.close();
   await writeFile(resolve(output, 'verification.json'), JSON.stringify({ passed: true, viewport: '390x844 and 1280x950', checks: ['account/password login', 'persistent cookie resumes without login', 'authenticated server CRUD', 'photo compression and persistence', 'favorite and search', 'cook steps', 'backup export and import with photos', 'history restoration', 'two independent devices', 'stale editor rejection retains draft', 'offline read-only cache', 'offline writes retained and resumed', 'server restart persistence', 'cached shell startup', 'logout clears private cache', 'no external browser requests', 'no runtime errors'], limitation: 'Local persistence adapter verified; real EdgeOne deployment/storage requires upload to the owner project.' }, null, 2));

@@ -1,5 +1,6 @@
 import { createId, validateRecipe } from './store.js';
 import { createOutbox } from './outbox.js';
+import { deadline } from './runtime.js';
 import { PHOTO_PACKET_TYPE, packPhotos, unpackPhotos, splitPhoto, joinPhoto } from './photo-wire.js';
 
 const CACHE_KEY = 'fengwei-server-cache-v2';
@@ -16,19 +17,22 @@ async function parallel(items, work, limit = 6) {
 export class ApiError extends Error {
   constructor(message, status, code) { super(message); Object.assign(this, { status, code }); }
 }
-export async function createRemoteStore(local) {
-  let pendingLogout = await local?.setting(LOGOUT_KEY).catch(() => null) || null;
+export async function createRemoteStore(local, { requestTimeout = 25000 } = {}) {
+  let cacheReadFailed = false;
+  const [savedLogout, savedSnapshot] = await Promise.all([LOGOUT_KEY, CACHE_KEY].map(key => local?.setting(key).catch(() => { cacheReadFailed = true; return null; })));
+  let pendingLogout = savedLogout || null;
   try { pendingLogout ||= JSON.parse(globalThis.localStorage?.getItem(LOGOUT_KEY) || 'null'); } catch {}
-  let snapshot = await local?.setting(CACHE_KEY).catch(() => null) || null;
+  let snapshot = savedSnapshot || null;
   if (pendingLogout) snapshot = null;
   if (!snapshot?.user?.id) snapshot = null;
+  if (snapshot && !(Date.now() - snapshot.authenticatedAt < CACHE_AGE)) snapshot = null;
   let offline = false, authenticated = false, user = snapshot?.user || null;
   let records = snapshot?.recipes || [], revisions = Object.assign(Object.create(null), snapshot?.revisions || {});
   let hashes = Object.assign(Object.create(null), snapshot?.photoHashes || {}), conflicts = [];
   let photoVersion = snapshot?.photoVersion || '';
   const photoCache = new Map();
   for (const recipe of records) { const key = hashes[recipe.id]; if (key && recipe.photo) photoCache.set(key, recipe.photo); }
-  let cacheWarning = !local;
+  let cacheWarning = !local || cacheReadFailed;
   let accountEpoch = 0, syncing = null, outbox = null;
   let dataEpoch = 0, mutationTail = Promise.resolve();
   function mutate(work) {
@@ -54,7 +58,7 @@ export async function createRemoteStore(local) {
     const previousId = user?.id;
     resetMemory();
     if (clearLocal && local) {
-      try { await local.setSetting(CACHE_KEY, null); await local.setSetting(OLD_CACHE_KEY, null); if (previousId) await local.setSetting(`fengwei-user:${previousId}:pendingWrites`, null); }
+      try { await Promise.all([local.setSetting(CACHE_KEY, null), local.setSetting(OLD_CACHE_KEY, null), ...(previousId ? [local.setSetting(`fengwei-user:${previousId}:pendingWrites`, null)] : [])]); }
       catch { cacheWarning = true; return false; }
     }
     return true;
@@ -68,23 +72,27 @@ export async function createRemoteStore(local) {
   async function request(path, { method = 'GET', value, binary, receivePhotos = false, retrySafe = false } = {}) {
     const epoch = accountEpoch;
     for (let attempt = 0; attempt < 3; attempt++) {
-      let response;
+      let response, data;
+      const controller = new AbortController();
       try {
-        response = await fetch(new URL(path, apiBase), { method, credentials: 'same-origin', cache: 'no-store', headers: { ...(receivePhotos ? { Accept: PHOTO_PACKET_TYPE } : {}), ...(binary ? { 'Content-Type': PHOTO_PACKET_TYPE } : value === undefined ? {} : { 'Content-Type': 'application/json' }) }, ...(binary ? { body: binary } : value === undefined ? {} : { body: JSON.stringify(value) }), signal: AbortSignal.timeout(25000) });
-      } catch {
+        await deadline((async () => {
+          response = await fetch(new URL(path, apiBase), { method, credentials: 'same-origin', cache: 'no-store', headers: { ...(receivePhotos ? { Accept: PHOTO_PACKET_TYPE } : {}), ...(binary ? { 'Content-Type': PHOTO_PACKET_TYPE } : value === undefined ? {} : { 'Content-Type': 'application/json' }) }, ...(binary ? { body: binary } : value === undefined ? {} : { body: JSON.stringify(value) }), signal: controller.signal });
+          try {
+            if (response.ok && response.headers.get('content-type') === PHOTO_PACKET_TYPE) {
+              const packet = unpackPhotos(await response.arrayBuffer()); data = packet.metadata;
+              if (Array.isArray(data.hashes)) {
+                if (data.hashes.length !== packet.photos.length) throw new Error('Photo count mismatch');
+                data.photos = Object.fromEntries(data.hashes.map((hash, i) => [hash, joinPhoto(packet.photos[i])]));
+              } else data.photo = joinPhoto(packet.photos[0]);
+            } else data = await response.json();
+          } catch { throw new ApiError('未收到完整结果，请重试以确认保存状态。', response.status, 'INVALID_RESPONSE'); }
+        })(), method === 'GET' && (path === 'me' || path.startsWith('recipes')) ? Math.min(requestTimeout, 12000) : requestTimeout, '服务器响应超时，请重试。', () => controller.abort());
+      } catch (error) {
+        controller.abort();
         if (retrySafe && attempt < 2 && epoch === accountEpoch) continue;
+        if (error.code === 'INVALID_RESPONSE') throw error;
         throw new ApiError(retrySafe ? '尚未确认保存结果，内容已保留。请联网后再次保存，将先核实上次结果。' : '服务器暂时连不上。缓存仍可查看，修改需要联网后再保存。', 0, 'NETWORK');
       }
-      let data;
-      try {
-        if (response.ok && response.headers.get('content-type') === PHOTO_PACKET_TYPE) {
-          const packet = unpackPhotos(await response.arrayBuffer()); data = packet.metadata;
-          if (Array.isArray(data.hashes)) {
-            if (data.hashes.length !== packet.photos.length) throw new Error('Photo count mismatch');
-            data.photos = Object.fromEntries(data.hashes.map((hash, i) => [hash, joinPhoto(packet.photos[i])]));
-          } else data.photo = joinPhoto(packet.photos[0]);
-        } else data = await response.json();
-      } catch { if (retrySafe && attempt < 2 && epoch === accountEpoch) continue; throw new ApiError('未收到完整结果，请重试以确认保存状态。', response.status, 'INVALID_RESPONSE'); }
       if (epoch !== accountEpoch) throw new ApiError('账号已切换，本次请求已取消。', 409, 'ACCOUNT_CHANGED');
       // Retries preserve the exact registration/mutation ID. These errors occur
       // before the platform's request body is available for a server mutation.
@@ -317,7 +325,7 @@ export async function createRemoteStore(local) {
   return {
     get user() { return user; },
     get readOnly() { return offline; },
-    get canEdit() { return !offline && !!user?.canEdit; },
+    get canEdit() { return authenticated && !offline && !!user?.canEdit; },
     get authenticated() { return authenticated; },
     get conflicts() { return conflicts; },
     get cacheWarning() { return cacheWarning; },
