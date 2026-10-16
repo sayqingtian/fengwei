@@ -19,7 +19,7 @@
     .boot-actions{display:flex;flex-wrap:wrap;gap:12px;justify-content:center}.boot-actions button{font:inherit;padding:12px 18px;border:1px solid #315947;border-radius:10px;background:#faf8f2;color:#315947;min-height:44px}
     .boot-actions button:disabled{opacity:.5}[hidden]{display:none!important}
   </style>
-  <link id="app-styles" rel="stylesheet" href="./styles.css" media="print" onload="this.media='all'">
+  <link id="app-styles" rel="stylesheet" href="./styles.css" media="print">
   <title>峰味 · 共享菜谱本</title>
 </head>
 <body>
@@ -75,7 +75,27 @@
         } catch (error) { problem(error.message || '更新失败，请确认网络后重试。'); }
         finally { updating = false; this.disabled = false; }
       };
-      import('./app.js').catch(function () { clearTimeout(timer); problem('应用文件加载未完成，请联网后点击“更新并重新打开”。'); });
+      var styles = document.getElementById('app-styles');
+      function applyStyles() {
+        if (!styles.sheet) return false;
+        styles.media = 'all';
+        return getComputedStyle(document.documentElement).getPropertyValue('--fengwei-styles-ready').trim() === 'yes';
+      }
+      // Cached CSS can finish before listeners attach. Verify an applied marker
+      // as well as load events, and never mount an unstyled application.
+      var styled = new Promise(function (resolve, reject) {
+        var timeout, poll;
+        function cleanup() { clearInterval(poll); clearTimeout(timeout); styles.removeEventListener('load', loaded); styles.removeEventListener('error', failed); }
+        function loaded() { if (applyStyles()) { cleanup(); resolve(); } }
+        function failed() { cleanup(); reject(new Error('styles')); }
+        poll = setInterval(loaded, 100); timeout = setTimeout(failed, 12000);
+        styles.addEventListener('load', loaded); styles.addEventListener('error', failed); loaded();
+      });
+      window.addEventListener('pageshow', applyStyles);
+      document.addEventListener('visibilitychange', function () { if (document.visibilityState === 'visible') applyStyles(); });
+      styled.then(function () {
+        return import('./app.js').catch(function () { clearTimeout(timer); problem('应用文件加载未完成，请联网后点击“更新并重新打开”。'); });
+      }).catch(function () { clearTimeout(timer); problem('页面样式未加载完成，请联网后重试或更新应用。'); });
     }());
   </script>
 </body>

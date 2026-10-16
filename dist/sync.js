@@ -230,16 +230,27 @@ export async function createRemoteStore(local, { requestTimeout = 25000 } = {}) 
   async function openOutbox() {
     if (outbox || !user?.id) return;
     const owner = user.id;
-    outbox = createOutbox({ local, owner, changed: notifyQueue, committed: () => globalThis.dispatchEvent?.(new Event('fengwei:sync-complete')),
+    outbox = createOutbox({ local, owner, changed: notifyQueue, committed: job => globalThis.dispatchEvent?.(new Event(job.kind.startsWith('checkin') ? 'fengwei:checkins-changed' : 'fengwei:sync-complete')),
       ready: () => authenticated && user?.id === owner && !pendingLogout && globalThis.navigator?.onLine !== false,
-      send: job => mutate(async () => {
+      send: job => {
+        if (job.kind === 'checkin' || job.kind === 'checkin-delete') return (async () => {
+          if (user?.id !== owner) throw new ApiError('请登录原账号继续同步。', 409, 'ACCOUNT_CHANGED');
+          let data;
+          try { data = await request(job.kind === 'checkin' ? 'checkins' : `checkins/${encodeURIComponent(job.checkinId)}`, { method: job.kind === 'checkin' ? 'POST' : 'DELETE', value: job.value, retrySafe: true }); }
+          catch (error) { if (job.kind === 'checkin' && error.code === 'CHECKIN_DELETED') return; throw error; }
+          await sameAccount(data);
+          globalThis.dispatchEvent?.(new CustomEvent('fengwei:checkin-confirmed', { detail: { userId: owner, item: data.item, id: job.checkinId, deleted: job.kind === 'checkin-delete' } }));
+          return;
+        })();
+        return mutate(async () => {
         if (user?.id !== owner) throw new ApiError('请登录原账号继续同步。', 409, 'ACCOUNT_CHANGED');
         if (job.kind === 'recipe') return sendWrite(job.id, job);
         const data = await request(`favorite/${encodeURIComponent(job.id)}`, { method: 'PUT', value: job.value, retrySafe: true });
         await sameAccount(data);
         records = records.map(recipe => recipe.id === job.id ? { ...recipe, favorite: data.favorite } : recipe);
         await persist();
-      }),
+        });
+      },
     });
     await outbox.reload().catch(() => { cacheWarning = true; });
   }
@@ -247,7 +258,7 @@ export async function createRemoteStore(local, { requestTimeout = 25000 } = {}) 
     const result = new Map(records.map(recipe => [recipe.id, recipe]));
     for (const job of outbox?.jobs || []) {
       if (job.kind === 'recipe') result.set(job.id, { ...job.recipe, favorite: result.get(job.id)?.favorite ?? job.recipe.favorite });
-      else if (result.has(job.id)) result.set(job.id, { ...result.get(job.id), favorite: job.value.favorite });
+      else if (job.kind === 'favorite' && result.has(job.id)) result.set(job.id, { ...result.get(job.id), favorite: job.value.favorite });
     }
     return [...result.values()];
   }
@@ -336,6 +347,20 @@ export async function createRemoteStore(local, { requestTimeout = 25000 } = {}) 
     get syncJobs() { return outbox?.jobs || []; },
     queuePut: (recipe, options) => enqueue('recipe', recipe.id, recipe, null, options),
     queueFavorite: (id, favorite) => enqueue('favorite', id, null, favorite),
+    async queueCheckin(value, title) {
+      if (!authenticated || !user || value.expectedUserId !== user.id) throw new ApiError('请登录原账号后打卡。', 409, 'ACCOUNT_CHANGED');
+      const owner = user.id; await openOutbox();
+      await outbox.enqueue({ token: createId(), kind: 'checkin', id: `checkin:${value.mutationId}`, checkinId: value.mutationId, title, cookedAt: new Date().toISOString(), value: { ...value, note: (value.note || '').trim() } });
+      if (owner !== user?.id) throw new ApiError('账号已切换，打卡保留在原账号的同步任务中。', 409, 'ACCOUNT_CHANGED');
+    },
+    async queueDeleteCheckin(item) {
+      if (!authenticated || !user) throw new ApiError('请先登录后删除打卡。', 401, 'LOGIN_REQUIRED');
+      const owner = user.id; await openOutbox();
+      const failed = outbox.jobs.find(job => job.kind === 'checkin' && job.checkinId === item.id && job.status === 'failed');
+      if (failed) { await outbox.discard(failed.token); return; }
+      await outbox.enqueue({ token: createId(), kind: 'checkin-delete', id: `checkin:${item.id}`, checkinId: item.id, title: item.title, value: { expectedUserId: owner } });
+      if (owner !== user?.id) throw new ApiError('账号已切换，删除任务保留在原账号的同步任务中。', 409, 'ACCOUNT_CHANGED');
+    },
     async retrySync() { await openOutbox(); await outbox?.retry(); },
     async resumeSync() { await openOutbox(); await outbox?.reload(); await outbox?.drain(); },
     async discardSync(token) { await outbox?.discard(token); },
@@ -433,6 +458,7 @@ export async function createRemoteStore(local, { requestTimeout = 25000 } = {}) 
     async decidePermission(value) { ensureOnline(); const data = await request('permissions/decision', { method: 'POST', value }); await sameAccount(data); return data; },
     async deleteAccounts(value) { ensureOnline(); const data = await request('accounts/delete', { method: 'POST', value: { ...value, expectedUserId: user?.id } }); await sameAccount(data); return data; },
     async photoInventory(cursor = '') { ensureOnline(); const data = await request(`admin/photos?cursor=${encodeURIComponent(cursor)}`); await sameAccount(data); return data; },
+    async cleanupImages(value) { ensureOnline(); const data = await request('admin/photos/cleanup', { method: 'POST', value: { ...value, expectedUserId: user?.id }, retrySafe: true }); await sameAccount(data); return data; },
     async image(hash) { ensureOnline(); const data = await request(`photo/${hash}`, { receivePhotos: true }); await sameAccount(data); return data.photo; },
     optimizeImage(hash, photo) {
       return mutate(async () => {

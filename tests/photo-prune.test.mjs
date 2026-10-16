@@ -9,6 +9,7 @@ import { RecipeDatabase, hash } from '../server/database.mjs';
 import { photoAccess, photoLeaseState } from '../server/photo-access.mjs';
 import { requestStore } from '../server/request-store.mjs';
 import { joinPhoto } from '../dist/photo-wire.js';
+import { createApi } from '../server/api.mjs';
 const picture = n => joinPhoto({ type: 'image/avif', bytes: new Uint8Array(n).fill(71) });
 async function fixture(t) {
   const root = await mkdtemp(join(tmpdir(), 'fengwei-prune-'));
@@ -93,4 +94,58 @@ test('expired leases cannot renew or release a replacement owner; writers requir
   assert.throws(() => photoLeaseState(write, { action: 'check', mode: 'read', token: 'a', now: 120002 }), { code: 'PHOTO_STORAGE_BUSY' });
   assert.equal(photoLeaseState(write, { action: 'release', mode: 'read', token: 'a', now: 120002 }).writer.token, 'b');
   await assert.rejects(photoAccess({}, 'write', () => assert.fail()), { code: 'PHOTO_STORAGE_BUSY' });
+});
+
+test('inventory separates current, recoverable history, trash and orphans; cleanup revalidates stale selections', async t => {
+  const f = await fixture(t), old = picture(41), current = picture(42), trashed = picture(43), orphan = picture(44);
+  await f.save('keep', old); await f.save('keep', current); await f.save('trash', trashed); await f.remove('trash');
+  await f.db.photos.save(orphan);
+  const inventory = await f.db.photos.inventory(), usage = new Map(inventory.items.map(item => [item.hash, item.usage]));
+  assert.equal(inventory.total, 4);
+  assert.equal(usage.get(hash(current)), 'current'); assert.equal(usage.get(hash(old)), 'history');
+  assert.equal(usage.get(hash(trashed)), 'history'); assert.equal(usage.get(hash(orphan)), 'orphan');
+  const request = { hashes: inventory.items.map(item => item.hash), mutationId: randomUUID() };
+  const cleaned = await f.db.photos.cleanup('test-owner', request); assert.equal(cleaned.complete, true);
+  assert.equal(await f.db.photo(hash(orphan)), null);
+  for (const image of [old, current, trashed]) assert.equal(await f.db.photo(hash(image)), image);
+  assert.deepEqual(await f.db.photos.cleanup('test-owner', request), { complete: true });
+  const fresh = picture(45); await f.db.photos.save(fresh);
+  await f.save('new', fresh); // The inventory is stale by the time cleanup runs.
+  await f.db.photos.cleanup('test-owner', { hashes: [hash(fresh)], mutationId: randomUUID() });
+  assert.equal(await f.db.photo(hash(fresh)), fresh);
+});
+
+test('orphan cleanup resumes interrupted deletion and restarts a bounded scan after new photo references', async t => {
+  const f = await fixture(t), orphan = picture(46), protectedPhoto = picture(47);
+  await f.db.photos.save(orphan); await f.db.photos.save(protectedPhoto);
+  for (let i = 0; i < 135; i++) await f.save('history', '', { notes: String(i) });
+  const request = { hashes: [hash(orphan), hash(protectedPhoto)], mutationId: randomUUID() };
+  assert.equal((await f.db.photos.cleanup('test-owner', request)).complete, false);
+  await f.save('history', protectedPhoto);
+  const remove = f.store.delete.bind(f.store); let fail = true;
+  f.store.delete = async key => { if (fail && key === `photos/${hash(orphan)}.bin`) throw new Error('Interrupted'); return remove(key); };
+  let complete = false, interrupted = false;
+  for (let i = 0; i < 8 && !complete; i++) {
+    try { complete = (await f.db.photos.cleanup('test-owner', request)).complete; }
+    catch (error) { assert.match(error.message, /Interrupted/); interrupted = true; fail = false; }
+  }
+  assert.ok(interrupted); assert.ok(complete);
+  assert.equal(await f.db.photo(hash(orphan)), null); assert.equal(await f.db.photo(hash(protectedPhoto)), protectedPhoto);
+});
+
+test('only the signed-in administrator can clean photos with a same-origin, account-bound request', async t => {
+  const f = await fixture(t), password = 'photo-cleanup-test-password', api = createApi({ database: f.db, password });
+  const call = (path, data, cookie, origin = 'https://photos.test') => api(new Request(`https://photos.test/api/${path}`, { method: 'POST', headers: { 'Content-Type': 'application/json', Origin: origin, ...(cookie ? { Cookie: cookie } : {}) }, body: JSON.stringify(data) }));
+  const admin = await call('login', { username: 'wupanfeng', password }), cookie = admin.headers.get('set-cookie').split(';')[0], user = (await admin.json()).user;
+  const viewer = await call('register', { displayName: '图片清理测试', password, registrationId: randomUUID() }), viewerCookie = viewer.headers.get('set-cookie').split(';')[0], viewerUser = (await viewer.json()).user;
+  const photo = picture(48); await f.db.photos.save(photo);
+  const data = { hashes: [hash(photo)], mutationId: randomUUID(), expectedUserId: user.id };
+  assert.equal((await call('admin/photos/cleanup', data)).status, 401);
+  assert.equal((await call('admin/photos/cleanup', { ...data, expectedUserId: viewerUser.id }, viewerCookie)).status, 403);
+  assert.equal((await call('admin/photos/cleanup', data, cookie, 'https://other.test')).status, 403);
+  assert.equal((await call('admin/photos/cleanup', { ...data, expectedUserId: viewerUser.id }, cookie)).status, 409);
+  assert.equal((await call('admin/photos/cleanup', { ...data, hashes: ['../bad'] }, cookie)).status, 400);
+  assert.ok(await f.db.photo(hash(photo)));
+  assert.equal((await call('admin/photos/cleanup', data, cookie)).status, 200);
+  assert.equal(await f.db.photo(hash(photo)), null);
 });

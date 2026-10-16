@@ -50,6 +50,37 @@ async function fast(work) {
 }
 async function eventually(check) { for (let i = 0; i < 100; i++) { if (check()) return; await new Promise(resolve => setTimeout(resolve, 5)); } assert.ok(check()); }
 
+test('three meals sync concurrently while local interactions continue and deletion follows its own create', async t => {
+  const f = await fixture(t), client = await f.client(); await client.put(recipe());
+  const hold = gate(), started = new Set(); t.after(() => hold.release());
+  f.state.before = async (path, options) => {
+    if (path === 'checkins' && options.method === 'POST') { started.add(JSON.parse(options.body).mutationId); await hold.promise; }
+  };
+  const values = Array.from({ length: 3 }, (_, index) => ({ recipeId: recipe().id, note: `并发 ${index}`, mutationId: randomUUID(), expectedUserId: f.user.id }));
+  for (const value of values) await fast(client.queueCheckin(value, recipe().title));
+  await eventually(() => started.size === 3);
+  await fast(client.queueFavorite(recipe().id, true)); assert.equal(client.current()[0].favorite, true);
+  await fast(client.queueDeleteCheckin({ id: values[0].mutationId, title: recipe().title }));
+  assert.equal(client.syncJobs.length, 5);
+  hold.release(); await client.resumeSync(); assert.equal(client.syncJobs.length, 0);
+  const list = await client.checkins(); assert.equal(list.total, 2);
+  assert.ok(list.items.every(item => item.id !== values[0].mutationId));
+});
+
+test('queued meals survive reload and lost replies with one server record per mutation', async t => {
+  const f = await fixture(t), local = localStore(), client = await f.client(local); await client.put(recipe());
+  let failures = 3;
+  f.state.after = (path, options, response) => { if (path === 'checkins' && options.method === 'POST' && response.ok && failures-- > 0) throw new Error('Reply lost'); };
+  const value = { recipeId: recipe().id, note: '心得保留', mutationId: randomUUID(), expectedUserId: f.user.id };
+  await fast(client.queueCheckin(value, recipe().title)); await client.resumeSync();
+  assert.equal(client.syncJobs.length, 1); assert.equal((await client.checkins()).total, 1);
+  await client.forget(false);
+  f.state.after = null;
+  const restored = await f.client(local); await restored.resumeSync();
+  assert.equal(restored.syncJobs.length, 0);
+  assert.deepEqual((await restored.checkins()).items.map(item => [item.id, item.note]), [[value.mutationId, value.note]]);
+});
+
 test('new recipe returns after durable local save while upload is held; backup cannot silently omit it', async t => {
   const f = await fixture(t), client = await f.client(), hold = gate();
   f.state.before = async path => { if (path.startsWith('recipe/')) await hold.promise; };

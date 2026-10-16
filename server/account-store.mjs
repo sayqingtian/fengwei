@@ -4,8 +4,9 @@ import { createHash, randomUUID } from 'node:crypto';
 import { AUDIT_PREFIX, auditTerms } from './audit-index.mjs';
 
 const removablePhotoMetadata = key => /^private\/photo-(optimizations|optimized)\/[a-f0-9]{64}\.json$/.test(key);
+const removableCheckinObject = key => /^private\/cooking-checkins\/usr_[a-f0-9]{32}\/[a-f0-9]{64}\.json$/.test(key);
 const removableRecipeObject = key => /^recipes\/[a-f0-9]{64}\/\d{12}-\d{13}-[a-zA-Z0-9-]{8,200}\.json$/.test(key) || /^private\/favorites\/usr_[a-f0-9]{32}\/[a-f0-9]{64}\/\d{13}-[a-zA-Z0-9-]+\.json$/.test(key);
-const accountPrefixes = ['private/photo-leases/', 'private/users/', 'private/usernames/', 'private/registrations/', 'private/password-changes/', 'private/password-heads/', 'private/account-migrations/', 'private/password-recovery-requests/', 'private/cooking-checkins/', 'private/password-recovery-decisions/', 'private/password-recovery-limits/', 'private/deleted-users/', 'private/rate-limits/', 'private/audit-index/', 'private/audit-canonical/', 'private/audit-migration/'];
+const accountPrefixes = ['private/photo-leases/', 'private/users/', 'private/usernames/', 'private/registrations/', 'private/password-changes/', 'private/password-heads/', 'private/account-migrations/', 'private/password-recovery-requests/', 'private/cooking-checkins/', 'private/password-recovery-decisions/', 'private/password-recovery-limits/', 'private/deleted-users/', 'private/rate-limits/', 'private/audit-index/', 'private/audit-canonical/', 'private/audit-migration/', 'private/cooking-checkin-deletions/'];
 const probePrefix = 'private/registration-storage-check';
 const sqlOnly = key => /^private\/(photo-leases|rate-limits|audit-index|audit-canonical|audit-migration)\//.test(key);
 const bindingKey = 'private/account-database-binding.json';
@@ -36,7 +37,7 @@ export function createAccountStore(source, { url, secretKey, namespace = 'fengwe
         if (isAccountKey(key)) await requireUnmigrated();
         return source.setJSON(key, value, options);
       },
-      async delete(key) { if (!isAuditObject(key) && !removablePhotoMetadata(key) && !removableRecipeObject(key) && !/^photos\/[a-f0-9]{64}\.(txt|bin)$/.test(key)) throw unavailable('ACCOUNT_DATABASE_UNSUPPORTED_KEY'); return source.delete(key); },
+      async delete(key) { if (!isAuditObject(key) && !removablePhotoMetadata(key) && !removableCheckinObject(key) && !removableRecipeObject(key) && !/^photos\/[a-f0-9]{64}\.(txt|bin)$/.test(key)) throw unavailable('ACCOUNT_DATABASE_UNSUPPORTED_KEY'); return source.delete(key); },
     };
   }
   return new SupabaseAccountStore(source, { url, secretKey, namespace, send });
@@ -139,7 +140,7 @@ class SupabaseAccountStore {
     if (this.source.delete) await this.source.delete(key);
   }
   async delete(key) {
-    if (!isAuditObject(key) && !removablePhotoMetadata(key) && !removableRecipeObject(key) && !/^photos\/[a-f0-9]{64}\.(txt|bin)$/.test(key)) throw unavailable('ACCOUNT_DATABASE_UNSUPPORTED_KEY');
+    if (!isAuditObject(key) && !removablePhotoMetadata(key) && !removableCheckinObject(key) && !removableRecipeObject(key) && !/^photos\/[a-f0-9]{64}\.(txt|bin)$/.test(key)) throw unavailable('ACCOUNT_DATABASE_UNSUPPORTED_KEY');
     if (isAccountKey(key)) await this.request('DELETE', [['namespace', `eq.${this.namespace}`], ['key', `eq.${key}`], ['select', 'namespace,key,value']], undefined, 'return=representation');
     await this.source.delete(key);
   }

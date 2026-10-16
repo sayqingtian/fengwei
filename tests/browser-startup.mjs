@@ -15,7 +15,10 @@ const database = new RecipeDatabase(new FileStore(resolve(output, `startup-test-
 const password = 'startup-isolated-browser-password', api = createApi({ database, password });
 const dish = { id: 'startup-dish', title: '冷启动保留的菜谱', category: '家常菜', description: '', notes: '', minutes: 10, servings: 2, photo: '', favorite: false, ingredients: [], steps: ['炒熟'], createdAt: new Date().toISOString(), updatedAt: new Date().toISOString() };
 await database.commit({ id: dish.id, recipe: dish, baseRevision: null, mutationId: randomUUID() });
-let failModule = false, holdRecipes = false, release = '3.1.5';
+const currentVersion = JSON.parse(await readFile('package.json', 'utf8')).version;
+const nextVersion = currentVersion.replace(/\d+$/, value => String(Number(value) + 1));
+let failModule = false, failStyles = false, holdStyles = false, holdRecipes = false, release = currentVersion;
+const styleWaiters = [];
 const types = { '.html': 'text/html; charset=utf-8', '.js': 'text/javascript; charset=utf-8', '.css': 'text/css', '.json': 'application/json', '.webmanifest': 'application/manifest+json', '.svg': 'image/svg+xml', '.png': 'image/png' };
 const server = createServer(async (req, res) => {
   try {
@@ -28,9 +31,13 @@ const server = createServer(async (req, res) => {
     const path = resolve(root, url.pathname === '/' ? 'index.html' : decodeURIComponent(url.pathname).slice(1));
     if (!path.startsWith(root + sep)) { res.writeHead(403); res.end(); return; }
     if (failModule && path === resolve(root, 'app.js')) { res.writeHead(503); res.end(); return; }
+    if (path === resolve(root, 'styles.css')) {
+      if (holdStyles) await new Promise(resolve => styleWaiters.push(resolve));
+      if (failStyles) { res.writeHead(503); res.end(); return; }
+    }
     let content = await readFile(path);
     if (path === resolve(root, 'version.json')) content = Buffer.from(JSON.stringify({ version: release }));
-    if (['sw.js', 'version.js'].some(name => path === resolve(root, name))) content = Buffer.from(content.toString().replaceAll("'3.1.5'", `'${release}'`).replace("'fengwei-shell-v28'", `'fengwei-shell-startup-${release}'`));
+    if (['sw.js', 'version.js'].some(name => path === resolve(root, name))) content = Buffer.from(content.toString().replaceAll(`'${currentVersion}'`, `'${release}'`).replace(/'fengwei-shell-v\d+'/, `'fengwei-shell-startup-${release}'`));
     res.writeHead(200, { 'Content-Type': types[extname(path)] || 'application/octet-stream', 'Cache-Control': 'no-store' }); res.end(content);
   } catch { res.writeHead(404); res.end(); }
 });
@@ -46,6 +53,31 @@ async function mobile() {
   return { context, page };
 }
 try {
+  holdStyles = true;
+  const styled = await mobile();
+  await styled.page.goto(base, { waitUntil: 'domcontentloaded' });
+  await styled.page.waitForTimeout(250);
+  assert.equal(await styled.page.locator('#startup').count(), 1);
+  assert.equal(await styled.page.locator('#app .shell').count(), 0);
+  assert.equal(await styled.page.evaluate(() => getComputedStyle(document.body).backgroundColor), 'rgb(250, 248, 242)');
+  holdStyles = false; styleWaiters.splice(0).forEach(resolve => resolve());
+  await styled.page.getByLabel('账号', { exact: true }).waitFor();
+  assert.equal(await styled.page.evaluate(() => getComputedStyle(document.documentElement).getPropertyValue('--fengwei-styles-ready').trim()), 'yes');
+  await styled.page.evaluate(() => { document.getElementById('app-styles').media = 'print'; window.dispatchEvent(new PageTransitionEvent('pageshow', { persisted: true })); });
+  assert.equal(await styled.page.locator('#app-styles').getAttribute('media'), 'all');
+  await styled.page.reload(); await styled.page.getByLabel('账号', { exact: true }).waitFor();
+  await styled.context.close();
+  console.log(`${engine}: delayed and cached styles stay applied, including a page restored from the background.`);
+
+  failStyles = true;
+  const noStyles = await mobile();
+  await noStyles.page.goto(base);
+  await noStyles.page.getByText('页面样式未加载完成，请联网后重试或更新应用。', { exact: true }).waitFor();
+  assert.equal(await noStyles.page.locator('#app .shell').count(), 0);
+  failStyles = false; await noStyles.page.getByRole('button', { name: '重新打开', exact: true }).click();
+  await noStyles.page.getByLabel('账号', { exact: true }).waitFor(); await noStyles.context.close();
+  console.log(`${engine}: failed CSS shows recovery controls instead of an unstyled application.`);
+
   // A failed entry module must leave working recovery controls in the HTML.
   failModule = true;
   const broken = await mobile();
@@ -90,11 +122,11 @@ try {
   await cached.page.getByText(/1 项修改已保存在本机/).waitFor();
   await cached.page.screenshot({ path: resolve(output, `startup-${engine}-cached.png`), fullPage: true });
   // The recovery update must remain available even while a read is pending.
-  release = '3.1.6';
+  release = nextVersion;
   await cached.page.getByRole('navigation', { name: '底部导航' }).getByRole('button', { name: '我的', exact: true }).click();
   await cached.page.getByRole('button', { name: '检查更新', exact: true }).click();
   await cached.page.getByRole('button', { name: '更新并重新打开', exact: true }).click();
-  await cached.page.locator('.footer').filter({ hasText: 'v3.1.6' }).waitFor();
+  await cached.page.locator('.footer').filter({ hasText: `v${nextVersion}` }).waitFor();
   await cached.page.getByText(/1 项修改已保存在本机/).waitFor();
   holdRecipes = false;
   await cached.page.unroute('**/api/favorite/**');

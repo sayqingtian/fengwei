@@ -134,6 +134,12 @@ export function createApi({ database, password }) {
       actor = user;
       if (route === 'me' && method === 'GET') return reply({ user });
       if (route === 'checkins' && method === 'GET') return reply({ userId: user.id, ...await checkins.list(user.id, url.searchParams.get('cursor') || '') });
+      if (route.startsWith('checkins/') && method === 'DELETE') {
+        const data = await body(request, 2048), id = route.slice(9);
+        if (data.expectedUserId !== user.id) fail(409, 'ACCOUNT_CHANGED', '账号已切换，请重新操作。');
+        action = 'recipe.checkin.delete'; operationId = id; target = '删除自己的打卡';
+        return reply({ userId: user.id, ...await checkins.remove(user.id, id, receipt()) });
+      }
       if (route === 'checkins' && method === 'POST') {
         action = 'recipe.checkin';
         const data = await body(request, 8192), value = checkins.validate(data);
@@ -170,6 +176,13 @@ export function createApi({ database, password }) {
         const cursor = url.searchParams.get('cursor') || '';
         if (cursor && !/^[a-f0-9]{64}$/.test(cursor)) fail(400, 'INVALID_CURSOR', '图片分页位置不正确。');
         return reply({ userId: user.id, ...await database.photos.inventory(cursor) });
+      }
+      if (route === 'admin/photos/cleanup' && method === 'POST') {
+        if (user.role !== 'admin') fail(403, 'ADMIN_REQUIRED', '只有管理员可以清理图片。');
+        const data = await body(request, 16384);
+        if (data?.expectedUserId !== user.id) fail(409, 'ACCOUNT_CHANGED', '账号已切换，请刷新后重试。');
+        action = 'photo.cleanup'; target = '完全无引用图片'; operationId = data.mutationId;
+        return reply({ userId: user.id, ...await database.photos.cleanup(user.id, data, receipt()) });
       }
       if (route.startsWith('admin/photos/') && method === 'PUT') {
         action = 'photo.optimize'; target = route.slice(13); operationId = target;

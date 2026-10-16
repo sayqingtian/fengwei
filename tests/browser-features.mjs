@@ -18,7 +18,10 @@ const viewer = await handler(new Request(`${base}/api/register`, { method: 'POST
 assert.equal(viewer.status, 201);
 const dish = { id: 'feature-dish', title: '家常番茄炒蛋', description: '每次下厨都值得记录', category: '家常菜', notes: '', minutes: 15, servings: 2, photo: `data:image/png;base64,${(await readFile(resolve(root, 'icons/icon-192.png'))).toString('base64')}`, favorite: false, ingredients: [{ name: '番茄', amount: '2 个' }], steps: ['切好番茄，打散鸡蛋。', '炒熟后调味，盛盘。'], createdAt: new Date().toISOString(), updatedAt: new Date().toISOString() };
 await database.commit({ id: dish.id, recipe: dish, baseRevision: null, mutationId: randomUUID() });
-let legacy = true, release = '3.1.5', failAsset = false, slow = false, failRecipes = false;
+const currentVersion = JSON.parse(await readFile('package.json', 'utf8')).version;
+const nextVersion = currentVersion.replace(/\d+$/, value => String(Number(value) + 1));
+const failedVersion = currentVersion.replace(/\d+$/, value => String(Number(value) + 2));
+let legacy = true, release = currentVersion, failAsset = false, slow = false, failRecipes = false;
 const oldFiles = new Map();
 const types = { '.html': 'text/html; charset=utf-8', '.js': 'text/javascript; charset=utf-8', '.json': 'application/json', '.css': 'text/css', '.png': 'image/png', '.svg': 'image/svg+xml', '.webmanifest': 'application/manifest+json' };
 const server = createServer(async (req, res) => {
@@ -41,7 +44,7 @@ const server = createServer(async (req, res) => {
     } else {
       data = await readFile(path);
       if (relative === 'version.json') data = Buffer.from(JSON.stringify({ version: release }));
-      if (['sw.js', 'version.js'].includes(relative)) data = Buffer.from(data.toString().replaceAll("'3.1.5'", `'${release}'`).replace("'fengwei-shell-v28'", `'fengwei-shell-test-${release}'`));
+      if (['sw.js', 'version.js'].includes(relative)) data = Buffer.from(data.toString().replaceAll(`'${currentVersion}'`, `'${release}'`).replace(/'fengwei-shell-v\d+'/, `'fengwei-shell-test-${release}'`));
     }
     res.writeHead(200, { 'Content-Type': types[extname(path)] || 'application/octet-stream', 'Cache-Control': 'no-store' }); res.end(data);
   } catch { res.writeHead(404); res.end('Not found'); }
@@ -120,14 +123,15 @@ try {
   await page.getByRole('textbox', { name: '这次下厨的心得' }).fill('番茄多炒一会儿，酸甜刚好。');
   await page.screenshot({ path: resolve(output, 'features-mobile-checkin.png'), fullPage: true });
   // Simulate losing the reply after a successful server write, then retry.
-  await page.route('**/api/checkins', async route => { if (route.request().method() === 'POST') { await route.fetch(); await route.abort('failed'); } else await route.continue(); });
+  let loseReplies = true;
+  await page.route('**/api/checkins', async route => { if (loseReplies && route.request().method() === 'POST') { await route.fetch(); await route.abort('failed'); } else await route.continue(); });
   await page.getByRole('button', { name: '提交打卡', exact: true }).click();
-  await page.locator('#checkin-error').waitFor({ state: 'visible' });
-  assert.equal(await page.getByRole('textbox', { name: '这次下厨的心得' }).inputValue(), '番茄多炒一会儿，酸甜刚好。');
-  await page.unroute('**/api/checkins'); await page.getByRole('button', { name: '提交打卡', exact: true }).click();
-  await page.getByRole('button', { name: '关闭菜谱' }).click();
+  await page.getByRole('button', { name: '关闭菜谱' }).click({ timeout: 1500 });
   await mobileMy().click(); await page.getByRole('button', { name: '我的打卡', exact: false }).click();
   await page.getByText('番茄多炒一会儿，酸甜刚好。', { exact: true }).waitFor();
+  loseReplies = false;
+  await page.getByText('已完成', { exact: true }).waitFor();
+  await page.getByText(/1 项修改已保存在本机/).waitFor({ state: 'hidden' });
   assert.equal(await page.locator('.checkin-entry').count(), 1);
   await page.screenshot({ path: resolve(output, 'features-mobile-checkin-history.png'), fullPage: true });
   console.log('Check-in retry and history passed.');
@@ -138,20 +142,33 @@ try {
   await other.getByRole('button', { name: '我的打卡', exact: false }).click();
   await other.getByText('番茄多炒一会儿，酸甜刚好。', { exact: true }).waitFor(); await another.close();
 
-  await mobileMy().click(); release = '3.1.6';
+  await mobileMy().click(); release = nextVersion;
   await page.getByRole('button', { name: '检查更新', exact: true }).click();
   await page.getByRole('button', { name: '更新并重新打开', exact: true }).waitFor();
   await page.getByRole('button', { name: '更新并重新打开', exact: true }).click();
   await page.waitForEvent('load'); await page.getByRole('button', { name: `查看 ${dish.title}`, exact: true }).waitFor();
-  await mobileMy().click(); await page.getByText('当前版本 3.1.6', { exact: true }).waitFor();
+  await mobileMy().click(); await page.getByText(`当前版本 ${nextVersion}`, { exact: true }).waitFor();
   await page.getByRole('button', { name: '我的打卡', exact: false }).click();
   await page.getByText('番茄多炒一会儿，酸甜刚好。', { exact: true }).waitFor();
+  // Hold deletion acknowledgements while the optimistic row disappears and
+  // navigation stays responsive. Retry must not revive the removed meal.
+  let releaseDeletion; const deletionGate = new Promise(resolve => { releaseDeletion = resolve; });
+  await page.route('**/api/checkins/*', async route => { await deletionGate; await route.continue(); });
+  await page.getByRole('button', { name: `删除 ${dish.title} 的这次打卡`, exact: true }).click();
+  await page.getByRole('alertdialog').getByRole('button', { name: '删除打卡', exact: true }).click();
+  await page.locator('.checkin-entry').waitFor({ state: 'hidden', timeout: 1500 });
+  await mobileMy().click({ timeout: 1500 });
+  await page.getByRole('button', { name: '我的打卡', exact: false }).click();
+  assert.equal(await page.locator('.checkin-entry').count(), 0);
+  releaseDeletion(); await page.getByText(/1 项修改已保存在本机/).waitFor({ state: 'hidden' });
+  await page.getByRole('button', { name: '刷新记录', exact: true }).click();
+  await page.getByText('还没有打卡。做好一道菜后，在菜谱详情里记录第一次吧。', { exact: true }).waitFor();
   // A partial download cannot replace the working offline shell.
-  await mobileMy().click(); release = '3.1.7'; failAsset = true;
+  await mobileMy().click(); release = failedVersion; failAsset = true;
   await page.getByRole('button', { name: '检查更新', exact: true }).click();
   await page.getByRole('button', { name: '更新并重新打开', exact: true }).click();
   await page.locator('.version-status').filter({ hasText: /仍在发布|未完成/ }).waitFor();
-  assert.equal(await page.getByText('当前版本 3.1.6', { exact: true }).count(), 1);
+  assert.equal(await page.getByText(`当前版本 ${nextVersion}`, { exact: true }).count(), 1);
   await context.setOffline(true); await page.reload();
   await page.getByRole('button', { name: `查看 ${dish.title}`, exact: true }).waitFor();
   await page.getByRole('button', { name: `查看 ${dish.title}`, exact: true }).click();

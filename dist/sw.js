@@ -1,5 +1,5 @@
-const CACHE = 'fengwei-shell-v28';
-const VERSION = '3.1.5';
+const CACHE = 'fengwei-shell-v29';
+const VERSION = '3.1.6';
 const ASSETS = ['./', './index.html', './styles.css', './app.js', './navigation.js', './store.js', './sync.js', './outbox.js', './my.js', './recovery.js', './photo.js', './photo-wire.js', './photos-page.js', './backup.js', './full-backup.js', './drafts.js', './updates.js', './version.js', './manifest.webmanifest', './icons/icon.svg', './icons/icon-192.png', './icons/icon-512.png', './icons/apple-touch-icon.png', './update.js', './checkins.js', './runtime.js'];
 function limit(promise, milliseconds, expired = () => {}) {
   let timer;

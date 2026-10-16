@@ -99,6 +99,12 @@ test('cooking check-ins use the existing SQL table and reserve one record across
   assert.equal((await b.list(`usr_${'d'.repeat(32)}`)).total, 0);
   assert.ok(![...f.source.records.keys()].some(key => key.startsWith('private/cooking-checkins/')));
   assert.equal((await pg.query('select count(*)::int as count from fengwei_account_records where namespace = $1 and key like $2', [f.namespace, 'private/cooking-checkins/%'])).rows[0].count, 1);
+  await Promise.all([a.remove(userId, value.id), b.remove(userId, value.id)]);
+  assert.equal((await a.list(userId)).total, 0);
+  assert.equal((await pg.query('select count(*)::int as count from fengwei_account_records where namespace = $1 and key like $2', [f.namespace, 'private/cooking-checkins/%'])).rows[0].count, 0);
+  const restarted = new CookingCheckins(f.store());
+  await assert.rejects(restarted.previous(userId, value), { code: 'CHECKIN_DELETED' });
+  assert.equal((await pg.query('select count(*)::int as count from fengwei_account_records where namespace = $1 and key like $2', [f.namespace, 'private/cooking-checkin-deletions/%'])).rows[0].count, 1);
 });
 
 test('warm authentication reads one fresh SQL credential snapshot per request and never caches password changes across handlers', async () => {

@@ -60,3 +60,33 @@ test('check-in pagination keeps equal-timestamp meals without omission or duplic
   const second = await checkins.list(f.first.user.id, first.cursor); assert.equal(second.items.length, 6); assert.equal(second.cursor, null);
   assert.equal(new Set([...first.items, ...second.items].map(item => item.id)).size, 56);
 });
+
+test('deletion is private, durable, idempotent and erases notes without allowing a late POST to resurrect them', async t => {
+  const f = await fixture(t), id = randomUUID(), data = { recipeId: f.recipe.id, note: '要删除的心得', mutationId: id, expectedUserId: f.first.user.id };
+  assert.equal((await f.call('checkins', 'POST', data, f.first.cookie)).status, 201);
+  const path = `checkins/${id}`, value = { expectedUserId: f.first.user.id };
+  assert.equal((await f.call(path, 'DELETE', value, f.second.cookie)).status, 409);
+  assert.equal((await f.call(path, 'DELETE', { expectedUserId: f.second.user.id }, f.second.cookie)).status, 404);
+  assert.equal((await f.call(path, 'DELETE', value, f.first.cookie, 'https://other.test')).status, 403);
+  const replies = await Promise.all([f.call(path, 'DELETE', value, f.first.cookie), f.call(path, 'DELETE', value, f.first.cookie)]);
+  assert.deepEqual(replies.map(response => response.status), [200, 200]);
+  const { hash } = await import('../server/database.mjs');
+  assert.equal(await f.source.get(`private/cooking-checkins/${f.first.user.id}/${hash(id)}.json`), null);
+  const marker = await f.source.get(`private/cooking-checkin-deletions/${f.first.user.id}/${hash(id)}.json`, { type: 'json' });
+  assert.ok(!JSON.stringify(marker).includes(data.note));
+  f.restart();
+  assert.equal((await (await f.call('checkins', 'GET', undefined, f.first.cookie)).json()).total, 0);
+  assert.equal((await f.call(path, 'DELETE', value, f.first.cookie)).status, 200);
+  assert.equal((await f.call('checkins', 'POST', data, f.first.cookie)).status, 410);
+  assert.equal((await f.database.latest(f.recipe.id)).recipe.title, f.recipe.title);
+});
+
+test('a create already in flight before deletion cannot recreate a removed check-in', async t => {
+  const f = await fixture(t), { CookingCheckins } = await import('../server/checkins.mjs'), id = randomUUID();
+  const checkins = new CookingCheckins(f.source), value = { id, recipeId: f.recipe.id, note: '旧请求' };
+  await checkins.add(f.first.user.id, value, f.recipe.title);
+  assert.ok(await checkins.previous(f.first.user.id, value));
+  await checkins.remove(f.first.user.id, id);
+  await assert.rejects(checkins.add(f.first.user.id, value, f.recipe.title), { code: 'CHECKIN_DELETED' });
+  assert.equal((await checkins.list(f.first.user.id)).total, 0);
+});

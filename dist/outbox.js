@@ -1,15 +1,15 @@
 // Durable, account-scoped intent queue. Network work never runs in the local
 // transaction, so a slow upload cannot block the next tap or local save.
-export function createOutbox({ local, owner, send, changed = () => {}, committed = () => {}, ready = () => true }) {
+export function createOutbox({ local, owner, send, concurrency = 3, changed = () => {}, committed = () => {}, ready = () => true }) {
   const key = `fengwei-user:${owner}:outbox-v1`;
-  let state = { jobs: [], receipts: {} }, tail = Promise.resolve(), running = null, timer, closed = false, authorized = false;
+  let state = { jobs: [], receipts: {} }, tail = Promise.resolve(), running = null, timer, closed = false, authorized = false, wakeDrain = () => {};
   const transient = error => !error.status || error.status === 429 || error.status >= 500 || error.code === 'INVALID_RESPONSE';
   function edit(work) {
     const run = async () => {
       if (!local) throw new Error('浏览器无法保存后台任务，请允许网站存储后重试。');
       const update = value => { const next = structuredClone(value || { jobs: [], receipts: {} }); work(next); return next; };
       const next = local.updateSetting ? await local.updateSetting(key, update) : await (async () => { const value = update(await local.setting(key)); await local.setSetting(key, value); return value; })();
-      state = next; if (!closed) changed(); return next;
+      state = next; wakeDrain(); if (!closed) changed(); return next;
     };
     const job = tail.then(run); tail = job.catch(() => {}); return job;
   }
@@ -21,11 +21,15 @@ export function createOutbox({ local, owner, send, changed = () => {}, committed
   }
   async function work() {
     await reload();
-    const attempted = new Set();
+    const attempted = new Set(), waiting = new Set(); let active = 0;
+    const wake = () => { for (const resolve of waiting) resolve(); waiting.clear(); };
+    wakeDrain = wake;
+    async function worker() {
     while (!closed && ready()) {
       const job = state.jobs.find((item, index, jobs) => item.status !== 'failed' && !attempted.has(item.token) && (!item.retryAt || item.retryAt <= Date.now()) && !jobs.slice(0, index).some(previous => previous.id === item.id));
-      if (!job) break;
-      attempted.add(job.token);
+      if (!job) { if (!active) break; await new Promise(resolve => waiting.add(resolve)); continue; }
+      attempted.add(job.token); active++;
+      try {
       // Resolve only a confirmed local predecessor, never a remote head. This
       // preserves conflict detection when another device has edited the recipe.
       const dependency = job.value.baseRevision?.startsWith('local:') ? job.value.baseRevision.slice(6) : null;
@@ -40,14 +44,19 @@ export function createOutbox({ local, owner, send, changed = () => {}, committed
           next.jobs = next.jobs.filter(item => item.token !== job.token);
           if (result?.revision) next.receipts[job.token] = result.revision;
         });
-        if (!closed) committed();
+        if (!closed) committed(sending);
       } catch (error) {
         await edit(next => {
           const item = next.jobs.find(item => item.token === job.token); if (!item) return;
           Object.assign(item, { status: transient(error) ? 'pending' : 'failed', error: error.message, code: error.code, retryAt: Date.now() + (error.status === 429 ? 60000 : Math.min(60000, 2000 * 2 ** Math.min(item.attempts, 5))) });
         });
       }
+      } finally { active--; wake(); }
     }
+    }
+    const results = await Promise.allSettled(Array.from({ length: Math.max(1, Math.min(3, concurrency)) }, worker));
+    wakeDrain = () => {};
+    const failed = results.find(result => result.status === 'rejected'); if (failed) throw failed.reason;
   }
   function drain() {
     if (running) return running;
@@ -84,6 +93,6 @@ export function createOutbox({ local, owner, send, changed = () => {}, committed
       });
     },
     drain,
-    close() { closed = true; clearTimeout(timer); },
+    close() { closed = true; clearTimeout(timer); wakeDrain(); },
   };
 }

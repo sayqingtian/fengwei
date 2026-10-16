@@ -2,7 +2,7 @@ export const AUDIT_RETENTION_DAYS = 7;
 export const auditCutoff = (now = Date.now()) => new Date(now - AUDIT_RETENTION_DAYS * 86400000).toISOString();
 export const auditExpired = (entry, cutoff = auditCutoff()) => !entry || typeof entry.createdAt !== 'string' || !Number.isFinite(Date.parse(entry.createdAt)) || entry.createdAt < cutoff;
 export const auditObjects = ['private/audit/', 'private/audit-index/', 'private/audit-canonical/', 'private/audit-pending/'];
-export const receiptObjects = ['recipes/', 'private/permissions/', 'private/permission-requests/', 'private/password-changes/', 'private/password-recovery-requests/', 'private/password-recovery-decisions/', 'private/deleted-users/', 'private/purged-recipes/', 'private/photo-optimizations/', 'private/cooking-checkins/'];
+export const receiptObjects = ['recipes/', 'private/permissions/', 'private/permission-requests/', 'private/password-changes/', 'private/password-recovery-requests/', 'private/password-recovery-decisions/', 'private/deleted-users/', 'private/purged-recipes/', 'private/photo-optimizations/', 'private/cooking-checkins/', 'private/cooking-checkin-deletions/', 'private/photo-cleanups/'];
 export const isAuditObject = key => auditObjects.some(prefix => key.startsWith(prefix));
 export const canPruneAudit = key => isAuditObject(key) || receiptObjects.some(prefix => key.startsWith(prefix));
 export function retainedRecord(key, value, cutoff = auditCutoff()) {

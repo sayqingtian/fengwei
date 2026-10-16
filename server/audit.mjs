@@ -5,7 +5,7 @@ import { hash } from './database.mjs';
 import { AUDIT_ACTIONS } from './audit-actions.mjs';
 import { auditCursor, auditMatches, publicAudit, indexAudit } from './audit-index.mjs';
 export { AUDIT_ACTIONS } from './audit-actions.mjs';
-const legacyPrefixes = ['private/audit/', 'recipes/', 'private/permissions/', 'private/permission-requests/', 'private/password-changes/', 'private/password-recovery-requests/', 'private/deleted-users/', 'private/password-recovery-decisions/', 'private/purged-recipes/', 'private/photo-optimizations/', 'private/cooking-checkins/'];
+const legacyPrefixes = ['private/audit/', 'recipes/', 'private/permissions/', 'private/permission-requests/', 'private/password-changes/', 'private/password-recovery-requests/', 'private/deleted-users/', 'private/password-recovery-decisions/', 'private/purged-recipes/', 'private/photo-optimizations/', 'private/cooking-checkins/', 'private/cooking-checkin-deletions/', 'private/photo-cleanups/'];
 const migrationKey = 'private/audit-migration/v1.json';
 export class AuditLog {
   constructor(store) { this.store = store; this.index = entry => store.indexAudit ? store.indexAudit(entry) : indexAudit(store, entry); }

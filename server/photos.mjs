@@ -89,7 +89,7 @@ export class Photos {
     return unused.length <= 8;
   }
   async inventory(cursor = '') {
-    const { blobs } = await this.store.list({ prefix: 'photos/', consistency: 'strong' });
+    const [{ blobs }, usage] = await Promise.all([this.store.list({ prefix: 'photos/', consistency: 'strong' }), this.references()]);
     const keys = [...new Set(blobs.map(({ key }) => /^photos\/([a-f0-9]{64})\.(?:txt|bin)$/.exec(key)?.[1]).filter(Boolean))].sort();
     const pending = keys.filter(key => key > cursor), chosen = pending.slice(0, 12);
     const paths = new Set(blobs.map(item => item.key));
@@ -97,9 +97,50 @@ export class Photos {
     const items = await Promise.all(chosen.map(async key => {
       const [image, optimized] = await Promise.all([this.raw(key), this.store.get(`private/photo-optimized/${key}.json`, { type: 'json', consistency: 'strong' })]);
       const extra = duplicates.has(key) ? await this.store.get(`photos/${key}.txt`, { consistency: 'strong' }) : '';
-      return image && { hash: key, bytes: image.storedBytes + Buffer.byteLength(extra || ''), format: image.type, legacy: image.legacy, optimized: !!optimized && !image.legacy && !extra };
+      return image && { hash: key, bytes: image.storedBytes + Buffer.byteLength(extra || ''), format: image.type, legacy: image.legacy, optimized: !!optimized && !image.legacy && !extra, usage: usage.current.has(key) ? 'current' : usage.used.has(key) ? 'history' : 'orphan' };
     }));
     return { items: items.filter(Boolean), total: keys.length, cursor: pending.length > chosen.length ? chosen.at(-1) : null };
+  }
+  async references() {
+    const [recipes, mappings] = await Promise.all([this.store.list({ prefix: 'recipes/', consistency: 'strong' }), this.store.list({ prefix: 'private/photo-optimizations/', consistency: 'strong' })]);
+    const used = new Set(), current = new Set(), aliases = new Map(), heads = new Map();
+    const events = recipes.blobs.flatMap(({ key }) => {
+      const match = /^recipes\/([a-f0-9]{64})\/(\d{12})-\d{13}-[a-zA-Z0-9-]+\.json$/.exec(key);
+      if (!match) return [];
+      const generation = Number(match[2]); heads.set(match[1], Math.max(heads.get(match[1]) || 0, generation));
+      return [{ key, id: match[1], generation }];
+    });
+    for (let offset = 0; offset < events.length; offset += 16) await Promise.all(events.slice(offset, offset + 16).map(async ({ key, id, generation }) => {
+      const value = await this.store.get(key, { type: 'json', consistency: 'strong' });
+      if (!value || value.photoHash && !validHash(value.photoHash)) throw new Error('Cannot verify photo references');
+      if (value.photoHash) { used.add(value.photoHash); if (!value.deleted && generation === heads.get(id)) current.add(value.photoHash); }
+    }));
+    for (let offset = 0; offset < mappings.blobs.length; offset += 16) await Promise.all(mappings.blobs.slice(offset, offset + 16).map(async ({ key }) => {
+      const source = /^private\/photo-optimizations\/([a-f0-9]{64})\.json$/.exec(key)?.[1], value = await this.store.get(key, { type: 'json', consistency: 'strong' });
+      if (!source || !value || !validHash(value.targetHash)) throw new Error('Cannot verify photo mappings');
+      aliases.set(source, value.targetHash);
+    }));
+    for (const set of [used, current]) for (const key of set) { const target = aliases.get(key); if (target) set.add(target); }
+    return { used, current };
+  }
+  cleanup(userId, { hashes, mutationId }, auditEntry) {
+    if (!Array.isArray(hashes) || !hashes.length || hashes.length > 100 || hashes.some(key => !validHash(key)) || typeof mutationId !== 'string' || !/^[a-f0-9]{8}-[a-f0-9]{4}-4[a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/.test(mutationId)) throw Object.assign(new Error('图片清理请求不正确。'), { status: 400, code: 'INVALID_PHOTO_CLEANUP' });
+    const requested = [...new Set(hashes)].sort(), key = `private/photo-cleanups/${digest(`${userId}:${mutationId}`)}.json`;
+    return photoAccess(this.store, 'write', async guard => {
+      let state = await this.store.get(key, { type: 'json', consistency: 'strong' });
+      if (state && JSON.stringify(state.requested) !== JSON.stringify(requested)) throw Object.assign(new Error('清理内容已变化，请刷新图片统计。'), { status: 409 });
+      state ||= { requested, candidates: requested, auditEntry };
+      if (!state.complete) {
+        const remember = async (candidates, scan = null) => {
+          state = { ...state, candidates, scan };
+          await this.store.setJSON(key, state, { cacheControl: 'no-store' });
+        };
+        const complete = await this.prune(state.candidates, remember, state.scan, guard);
+        state = { ...state, complete };
+        await this.store.setJSON(key, state, { cacheControl: 'no-store' });
+      }
+      return { complete: !!state.complete };
+    });
   }
   optimize(key, photo, auditEntry) { return photoAccess(this.store, 'read', guard => this.optimizeLocked(key, photo, auditEntry, guard)); }
   async optimizeLocked(key, photo, auditEntry, guard) {
