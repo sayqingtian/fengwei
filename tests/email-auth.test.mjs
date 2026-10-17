@@ -126,10 +126,10 @@ test('expired, superseded and wrong-purpose codes cannot register an account', a
   const second = await f.send({ purpose: 'register', email: 'codes@example.test' });
   const registration = { displayName: '失效验证', password, registrationId: randomUUID() };
   assert.equal((await f.call('register', { ...registration, ...first })).status, 400);
-  const record = await f.store.get(`private/email-challenges/${second.challengeId}.json`, { type: 'json' });
-  record.purpose = 'recover'; await f.store.setJSON(`private/email-challenges/${second.challengeId}.json`, record);
-  assert.equal((await f.call('register', { ...registration, ...second })).status, 400);
-  record.purpose = 'register'; record.expiresAt = now - 1; await f.store.setJSON(`private/email-challenges/${second.challengeId}.json`, record);
+  const admin = await f.legacy();
+  const binding = await f.send({ purpose: 'bind', email: 'wrong-purpose@example.test', currentPassword: password, expectedUserId: admin.user.id }, admin.cookie);
+  assert.equal((await f.call('register', { ...registration, ...binding })).status, 400, 'a correctly signed binding code cannot register an account');
+  now += 600001;
   assert.equal((await f.call('register', { ...registration, ...second })).status, 400);
 });
 

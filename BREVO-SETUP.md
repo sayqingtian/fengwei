@@ -49,6 +49,8 @@ Brevo 支持通过发送到邮箱的六位验证码验证发信人。使用免�
 - **Brevo 账号或交易邮件服务尚未开通**：按控制台要求完成审核或联系 Brevo 支持，等待 Transactional 功能可用。
 - **密钥无效或已停用**：确认复制的是完整 API v3 Key，而非 SMTP Key；检查是否已停用，更新 EdgeOne 后重新部署。
 - **没有发送权限**：检查 Brevo API 权限、账号安全策略、账号状态及发信人。云函数出口 IP 由平台决定，应按 Brevo 的实际安全提示处理。
+- **Brevo 拦截了云函数的来源 IP**：打开 Security → Authorized IPs → Unauthorized IP addresses，核对试发时间及对应请求后，授权实际发起调用的云函数出口 IP。浏览器或电脑访问网站所用的地址不能代表云函数出口。手动添加授权 IP 会开启对未授权 IP 的限制；操作前应确认所需的调用来源。参考 [官方 IP 授权说明](https://help.brevo.com/hc/en-us/articles/5740111683858-Authorize-and-block-IP-addresses-for-API-and-SMTP-security)。
+- **Brevo 拒绝了发信请求的认证**：提供方只返回了笼统的认证失败，不能仅据此判断密钥已失效。核对 `FENGWEI_EMAIL_PROVIDER=brevo`、完整 API v3 密钥、生产部署是否包含新变量，以及 Brevo 的 IP 授权记录。
 - **邮件服务额度已用完**：查看 Brevo 的实际剩余额度。免费额度可能与该账号的其他邮件任务共用，排队中的验证码可能在送达前过期。
 - **连接失败或超时**：检查 EdgeOne 到 `https://api.brevo.com` 的连通性。云函数日志只记录提供方、安全错误分类和 HTTP 状态，不包含邮箱、验证码、API 密钥或原始提供方正文。
 

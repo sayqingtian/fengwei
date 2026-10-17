@@ -18,6 +18,8 @@ export function normalizeEmail(value) {
 const deliveryMessages = {
   EMAIL_KEY_INVALID: '邮件服务密钥无效或已停用，请管理员检查当前邮件服务的 API 密钥后重新部署。',
   EMAIL_KEY_PERMISSION: '邮件服务密钥没有发送权限，请管理员检查密钥权限、发送者与域名范围。',
+  EMAIL_IP_UNAUTHORIZED: 'Brevo 拦截了云函数的来源 IP，请管理员在 Security → Authorized IPs 核对本次发信请求并授权云函数出口 IP。',
+  EMAIL_AUTH_FAILED: 'Brevo 拒绝了发信请求的认证，请管理员核对 API 密钥、邮件服务选择及 IP 授权记录。',
   EMAIL_DOMAIN_UNVERIFIED: '发信域名尚未通过验证，请管理员在 Resend 完成域名验证，并检查 FENGWEI_EMAIL_FROM 使用的是已验证域名。',
   EMAIL_DOMAIN_UNSUPPORTED: 'Resend 不接受这个免费公共域名，请改用独立域名，或联系管理员切换邮件服务。',
   EMAIL_TEST_RECIPIENT_RESTRICTED: '当前使用 Resend 测试发信地址，只能发给 Resend 账号自己的邮箱；向其他邮箱发送前，需要验证自己的发信域名。',
@@ -44,7 +46,8 @@ function providerFailure(status, value, provider = 'resend') {
   const name = typeof value?.[provider === 'brevo' ? 'code' : 'name'] === 'string' ? value[provider === 'brevo' ? 'code' : 'name'] : '';
   const message = typeof value?.message === 'string' ? value.message.slice(0, 2000) : '';
   let code = 'EMAIL_SEND_UNAVAILABLE';
-  if (provider === 'brevo' && name === 'account_under_validation') code = 'EMAIL_ACCOUNT_PENDING';
+  if (provider === 'brevo' && [401, 403].includes(status) && /\bip(?:\s+address(?:es)?)?\b/i.test(message) && /unrecogni[sz]ed|unauthori[sz]ed|not authori[sz]ed|not verified|blocked|not allowed|whitelist|authori[sz]ation/i.test(message)) code = 'EMAIL_IP_UNAUTHORIZED';
+  else if (provider === 'brevo' && name === 'account_under_validation') code = 'EMAIL_ACCOUNT_PENDING';
   else if (provider === 'brevo' && /sender.{0,180}(?:not valid|not verified|not activated|inactive|unverified)|(?:invalid|unverified).{0,100}sender/i.test(message)) code = 'EMAIL_SENDER_UNVERIFIED';
   else if (provider === 'brevo' && /(?:account|smtp|transactional).{0,160}(?:not (?:yet )?activated|not enabled|validation|suspend|not active)/i.test(message)) code = 'EMAIL_ACCOUNT_PENDING';
   else if (name === 'not_enough_credits') code = 'EMAIL_PROVIDER_QUOTA';
@@ -52,8 +55,9 @@ function providerFailure(status, value, provider = 'resend') {
   else if (name === 'monthly_quota_exceeded') code = 'EMAIL_PROVIDER_MONTHLY_LIMIT';
   else if (['concurrent_idempotent_requests', 'rate_limit_exceeded', 'duplicate_request'].includes(name) || status === 429) code = 'EMAIL_SEND_BUSY';
   else if (name === 'invalid_idempotent_request') code = 'EMAIL_RETRY_CONFLICT';
-  else if (status === 401 || ['missing_api_key', 'restricted_api_key', 'suspended_api_key', 'unauthorized'].includes(name) || /api key.{0,80}(?:invalid|not active|suspended)/i.test(message)) code = 'EMAIL_KEY_INVALID';
+  else if ((provider !== 'brevo' && status === 401) || ['missing_api_key', 'restricted_api_key', 'suspended_api_key'].includes(name) || /\b(?:api )?key\b.{0,80}(?:invalid|not found|not active|suspended)/i.test(message)) code = 'EMAIL_KEY_INVALID';
   else if (['invalid_permission', 'permission_denied'].includes(name)) code = 'EMAIL_KEY_PERMISSION';
+  else if (provider === 'brevo' && (status === 401 || name === 'unauthorized')) code = 'EMAIL_AUTH_FAILED';
   else if (/only send (?:testing|test) emails/i.test(message)) code = 'EMAIL_TEST_RECIPIENT_RESTRICTED';
   else if (provider === 'resend' && /(?:not|don't) allow free public domains/i.test(message)) code = 'EMAIL_DOMAIN_UNSUPPORTED';
   else if (/domain.{0,200}(?:not verified|unverified)|(?:verify|verified).{0,150}domain/i.test(message)) code = 'EMAIL_DOMAIN_UNVERIFIED';

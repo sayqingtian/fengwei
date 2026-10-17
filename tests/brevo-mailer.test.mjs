@@ -69,6 +69,27 @@ test('Brevo sender verification, account activation and quota failures have safe
   await assert.rejects(() => malformed.sendCode(value()), { code: 'EMAIL_PROVIDER_RESPONSE_INVALID' });
 });
 
+test('Brevo IP restrictions take precedence over unauthorized status without exposing provider diagnostics', async t => {
+  const log = t.mock.method(console, 'error', () => {}), address = '198.51.100.27';
+  const cases = [
+    [401, 'unauthorized', `Unrecognised IP address ${address}. Authorize it in your security settings.`, 'EMAIL_IP_UNAUTHORIZED'],
+    [401, 'unauthorized', `IP address ${address} not authorized`, 'EMAIL_IP_UNAUTHORIZED'],
+    [403, 'permission_denied', `IP address ${address} is blocked`, 'EMAIL_IP_UNAUTHORIZED'],
+    [401, 'unauthorized', 'not verified', 'EMAIL_AUTH_FAILED'],
+    [401, 'unauthorized', 'Unknown authentication failure', 'EMAIL_AUTH_FAILED'],
+    [401, 'unauthorized', 'Key not found', 'EMAIL_KEY_INVALID'],
+  ];
+  for (const [status, code, message, expected] of cases) {
+    const mailer = createBrevoMailer({ apiKey: secret, from, fetch: async () => Response.json({ code, message: `${message} ${secret}` }, { status }) });
+    await assert.rejects(() => mailer.sendCode(value()), error => error.code === expected && !error.message.includes(secret) && !error.message.includes(address));
+  }
+  const logs = JSON.stringify(log.mock.calls.map(call => call.arguments));
+  assert.ok(!logs.includes(secret)); assert.ok(!logs.includes(address));
+  assert.match(logs, /EMAIL_IP_UNAUTHORIZED/);
+  const unreadable = createBrevoMailer({ apiKey: secret, from, fetch: async () => new Response('Unknown authentication failure', { status: 401 }) });
+  await assert.rejects(() => unreadable.sendCode(value()), { code: 'EMAIL_AUTH_FAILED' });
+});
+
 test('Brevo accepts only an explicit idempotency acknowledgement as a successful retry', async t => {
   t.mock.method(console, 'error', () => {});
   const send = message => createBrevoMailer({ apiKey: secret, from, fetch: async () => Response.json({ code: 'duplicate_parameter', message }, { status: 400 }) }).sendCode(value());
