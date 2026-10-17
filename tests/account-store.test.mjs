@@ -370,9 +370,11 @@ test('SQL account deletion revokes existing sessions and recovery, protects admi
 test('SQL audit migration resumes in bounded batches, pages without legacy reads, filters literal text and dates, and repairs a failed index write', async () => {
   const { AuditLog } = await import('../server/audit.mjs');
   const f = fixture(), legacy = new AuditLog(f.source);
+  const recent = new Date(Date.now() - 4 * 86400000), firstDay = Date.UTC(recent.getUTCFullYear(), recent.getUTCMonth(), recent.getUTCDate());
+  const days = [0, 1, 2].map(offset => new Date(firstDay + offset * 86400000).toISOString().slice(0, 10));
   for (let i = 0; i < 230; i++) {
     const entry = legacy.entry({ id: 'review', displayName: '测试用户' }, 'recipe.view', { target: i === 100 ? '100%_*.[literal]' : `历史日志 ${i}` });
-    entry.createdAt = new Date(Date.UTC(2026, 9, 10 + Math.floor(i / 100), 0, 0, i % 100)).toISOString();
+    entry.createdAt = new Date(firstDay + Math.floor(i / 100) * 86400000 + (i % 100) * 1000).toISOString();
     await f.source.setJSON(`private/audit/${entry.id}.json`, entry);
   }
   const store = f.store(), originalSet = store.setJSON.bind(store); let breakIndex = false;
@@ -389,9 +391,9 @@ test('SQL audit migration resumes in bounded batches, pages without legacy reads
   assert.equal(new Set([...page.items, ...next.items].map(item => item.id)).size, 100);
   const pageQueries = f.requests.filter(item => item.url.searchParams.get('order') === 'key.desc');
   assert.equal(pageQueries.length, 1); assert.equal(pageQueries[0].url.searchParams.get('limit'), '51');
-  const filtered = await (await f.call(api, `audit?q=${encodeURIComponent('100%_*.[literal]')}&from=2026-10-11&to=2026-10-11`, 'GET', undefined, cookie)).json();
+  const filtered = await (await f.call(api, `audit?q=${encodeURIComponent('100%_*.[literal]')}&from=${days[1]}&to=${days[1]}`, 'GET', undefined, cookie)).json();
   assert.equal(filtered.items.length, 1); assert.equal(filtered.items[0].target, '100%_*.[literal]'); assert.equal(filtered.items[0].searchText, undefined);
-  const exported = await f.call(api, 'audit/export?format=json&from=2026-10-10&to=2026-10-10', 'GET', undefined, cookie);
+  const exported = await f.call(api, `audit/export?format=json&from=${days[0]}&to=${days[0]}`, 'GET', undefined, cookie);
   assert.equal(exported.status, 200); assert.equal((await exported.json()).total, 100);
   assert.equal((await f.call(api, 'audit?from=2026-02-31', 'GET', undefined, cookie)).status, 400);
   breakIndex = true;

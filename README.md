@@ -22,7 +22,7 @@ GitHub 关联项目与原直接上传项目是不同项目，Blob 数据不会�
 
 新账号注册需要验证邮箱；旧账号登录后可在“我的 → 我的账号”绑定找回邮箱，管理员也适用。登录页“忘记密码？”支持通过账号与已绑定邮箱验证后设置新密码；未绑定的旧账号仍可提交管理员线下找回申请。
 
-在 EdgeOne 生产环境增加 `FENGWEI_RESEND_API_KEY` 和 `FENGWEI_EMAIL_FROM`，并重新部署。发信地址必须属于 Resend 已验证的域名；未配置时旧账号仍能登录，新注册需要等待邮件配置完成。沿用原 Supabase 表，无需启用 Supabase Auth。完整准备步骤、额度说明和验收方法见 [EMAIL-SETUP.md](EMAIL-SETUP.md)。
+无需购买独立域名的方案见 [BREVO-SETUP.md](BREVO-SETUP.md)：在 Brevo 验证已有发信邮箱，在 EdgeOne 生产环境设置 `FENGWEI_EMAIL_PROVIDER=brevo`、`FENGWEI_BREVO_API_KEY` 和 `FENGWEI_EMAIL_FROM` 后重新部署。Brevo 按其政策代发免费邮箱地址，实际送达需试发确认。已有独立域名也可继续使用 Resend，见 [EMAIL-SETUP.md](EMAIL-SETUP.md)。未配置邮件服务时旧账号仍能登录，新注册需要等待配置完成。沿用原 Supabase 表，无需启用 Supabase Auth。
 
 ## 性能与同步
 

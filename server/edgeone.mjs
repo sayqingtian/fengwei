@@ -3,7 +3,7 @@ import { RecipeDatabase } from './database.mjs';
 import { createApi } from './api.mjs';
 import { publicEdgeOneRequest, DEFAULT_PUBLIC_ORIGIN } from './edgeone-request.mjs';
 import { createAccountStore } from './account-store.mjs';
-import { createResendMailer } from './email-auth.mjs';
+import { createEmailMailer } from './email-auth.mjs';
 
 let handler;
 export default async function onRequest({ request, env = {}, clientIp }) {
@@ -20,7 +20,7 @@ export default async function onRequest({ request, env = {}, clientIp }) {
         secretKey: process.env.FENGWEI_SUPABASE_SECRET_KEY || env.FENGWEI_SUPABASE_SECRET_KEY,
         namespace: process.env.FENGWEI_ACCOUNT_NAMESPACE || env.FENGWEI_ACCOUNT_NAMESPACE || blobNamespace,
       });
-      handler = createApi({ database: new RecipeDatabase(store), mailer: createResendMailer({ apiKey: process.env.FENGWEI_RESEND_API_KEY || env.FENGWEI_RESEND_API_KEY, from: process.env.FENGWEI_EMAIL_FROM || env.FENGWEI_EMAIL_FROM }) });
+      handler = createApi({ database: new RecipeDatabase(store), mailer: createEmailMailer({ provider: process.env.FENGWEI_EMAIL_PROVIDER || env.FENGWEI_EMAIL_PROVIDER, resendApiKey: process.env.FENGWEI_RESEND_API_KEY || env.FENGWEI_RESEND_API_KEY, brevoApiKey: process.env.FENGWEI_BREVO_API_KEY || env.FENGWEI_BREVO_API_KEY, from: process.env.FENGWEI_EMAIL_FROM || env.FENGWEI_EMAIL_FROM }) });
     } catch {
       return Response.json({ error: '服务器持久化存储尚未连接，请检查 EdgeOne 的 Blob 服务是否可用。', code: 'STORAGE_UNAVAILABLE' }, { status: 503, headers: { 'Cache-Control': 'private, no-store', 'Vary': 'Cookie' } });
     }

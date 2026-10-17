@@ -15,24 +15,121 @@ export function normalizeEmail(value) {
   return email;
 }
 
+const deliveryMessages = {
+  EMAIL_KEY_INVALID: '邮件服务密钥无效或已停用，请管理员检查当前邮件服务的 API 密钥后重新部署。',
+  EMAIL_KEY_PERMISSION: '邮件服务密钥没有发送权限，请管理员检查密钥权限、发送者与域名范围。',
+  EMAIL_DOMAIN_UNVERIFIED: '发信域名尚未通过验证，请管理员在 Resend 完成域名验证，并检查 FENGWEI_EMAIL_FROM 使用的是已验证域名。',
+  EMAIL_DOMAIN_UNSUPPORTED: 'Resend 不接受这个免费公共域名，请改用独立域名，或联系管理员切换邮件服务。',
+  EMAIL_TEST_RECIPIENT_RESTRICTED: '当前使用 Resend 测试发信地址，只能发给 Resend 账号自己的邮箱；向其他邮箱发送前，需要验证自己的发信域名。',
+  EMAIL_FROM_INVALID: '发信地址格式不正确，请管理员检查 FENGWEI_EMAIL_FROM，填写已验证的发信邮箱，或使用“峰味 <发信邮箱>”格式。',
+  EMAIL_SENDER_UNVERIFIED: '发信邮箱尚未验证或未启用，请管理员在 Brevo 的 Senders 中添加此邮箱并完成验证码验证。',
+  EMAIL_ACCOUNT_PENDING: 'Brevo 账号或交易邮件服务尚未开通，请管理员完成账号审核并确认 Transactional 邮件已启用。',
+  EMAIL_PROVIDER_QUOTA: '邮件服务发送额度已用完，请额度恢复后重试或联系管理员。',
+  EMAIL_PROVIDER_DAILY_LIMIT: '邮件服务今日额度已用完，请额度恢复后重试或联系管理员。',
+  EMAIL_PROVIDER_MONTHLY_LIMIT: '邮件服务本月额度已用完，请联系管理员。',
+  EMAIL_SEND_BUSY: '邮件服务请求较多，请稍后重新获取验证码。',
+  EMAIL_RETRY_CONFLICT: '发信配置可能已变化，请刷新页面后重新获取验证码。',
+  EMAIL_NETWORK_UNAVAILABLE: '服务器连接邮件服务失败或超时，请稍后重试；持续失败请管理员检查云函数外网连接。',
+  EMAIL_PROVIDER_UNAVAILABLE: '邮件服务暂时不可用，请稍后重试。',
+  EMAIL_PROVIDER_RESPONSE_INVALID: '邮件服务返回了无效响应，请稍后重试或联系管理员。',
+  EMAIL_SEND_UNAVAILABLE: '验证码邮件暂时发送失败，请稍后重试或联系管理员。',
+};
+function deliveryFailure(code, providerStatus = 0, provider = 'resend') {
+  // Only static classifications are logged or returned. Provider bodies may
+  // contain API keys, sender addresses or recipient addresses.
+  console.error('Fengwei email delivery failed:', JSON.stringify({ provider, code, providerStatus }));
+  return problem(503, code, deliveryMessages[code]);
+}
+function providerFailure(status, value, provider = 'resend') {
+  const name = typeof value?.[provider === 'brevo' ? 'code' : 'name'] === 'string' ? value[provider === 'brevo' ? 'code' : 'name'] : '';
+  const message = typeof value?.message === 'string' ? value.message.slice(0, 2000) : '';
+  let code = 'EMAIL_SEND_UNAVAILABLE';
+  if (provider === 'brevo' && name === 'account_under_validation') code = 'EMAIL_ACCOUNT_PENDING';
+  else if (provider === 'brevo' && /sender.{0,180}(?:not valid|not verified|not activated|inactive|unverified)|(?:invalid|unverified).{0,100}sender/i.test(message)) code = 'EMAIL_SENDER_UNVERIFIED';
+  else if (provider === 'brevo' && /(?:account|smtp|transactional).{0,160}(?:not (?:yet )?activated|not enabled|validation|suspend|not active)/i.test(message)) code = 'EMAIL_ACCOUNT_PENDING';
+  else if (name === 'not_enough_credits') code = 'EMAIL_PROVIDER_QUOTA';
+  else if (name === 'daily_quota_exceeded') code = 'EMAIL_PROVIDER_DAILY_LIMIT';
+  else if (name === 'monthly_quota_exceeded') code = 'EMAIL_PROVIDER_MONTHLY_LIMIT';
+  else if (['concurrent_idempotent_requests', 'rate_limit_exceeded', 'duplicate_request'].includes(name) || status === 429) code = 'EMAIL_SEND_BUSY';
+  else if (name === 'invalid_idempotent_request') code = 'EMAIL_RETRY_CONFLICT';
+  else if (status === 401 || ['missing_api_key', 'restricted_api_key', 'suspended_api_key', 'unauthorized'].includes(name) || /api key.{0,80}(?:invalid|not active|suspended)/i.test(message)) code = 'EMAIL_KEY_INVALID';
+  else if (['invalid_permission', 'permission_denied'].includes(name)) code = 'EMAIL_KEY_PERMISSION';
+  else if (/only send (?:testing|test) emails/i.test(message)) code = 'EMAIL_TEST_RECIPIENT_RESTRICTED';
+  else if (provider === 'resend' && /(?:not|don't) allow free public domains/i.test(message)) code = 'EMAIL_DOMAIN_UNSUPPORTED';
+  else if (/domain.{0,200}(?:not verified|unverified)|(?:verify|verified).{0,150}domain/i.test(message)) code = 'EMAIL_DOMAIN_UNVERIFIED';
+  else if (/from.{0,120}(?:invalid|not valid)|(?:invalid|valid).{0,120}from/i.test(message)) code = 'EMAIL_FROM_INVALID';
+  else if (status >= 500) code = 'EMAIL_PROVIDER_UNAVAILABLE';
+  return deliveryFailure(code, status, provider);
+}
+
+function emailSender(from, provider) {
+  const match = /^(?:([^<>\r\n]+)<([^<>\r\n]+)>|([^<>\s]+))$/.exec(from);
+  try {
+    const email = normalizeEmail(match?.[2] || match?.[3]);
+    const name = (match?.[1] || '峰味').trim().replace(/^"(.*)"$/, '$1');
+    return { name, email };
+  } catch { throw deliveryFailure('EMAIL_FROM_INVALID', 0, provider); }
+}
+function codeMessage(purpose, code) {
+  const operation = { register: '注册账号', recover: '找回密码', bind: '绑定邮箱' }[purpose];
+  return { subject: `峰味${operation}验证码`, text: `你正在峰味${operation}。\n\n验证码：${code}\n\n验证码 10 分钟内有效，请勿转发给他人。如非本人操作，请忽略这封邮件。` };
+}
+async function sendMailRequest(send, url, headers, body, provider) {
+  let response;
+  try { response = await send(url, { method: 'POST', headers: { ...headers, 'Content-Type': 'application/json', Accept: 'application/json' }, body: JSON.stringify(body), signal: AbortSignal.timeout(10000) }); }
+  catch { throw deliveryFailure('EMAIL_NETWORK_UNAVAILABLE', 0, provider); }
+  let value;
+  try { value = await response.json(); }
+  catch (error) {
+    if (['TimeoutError', 'AbortError'].includes(error?.name)) throw deliveryFailure('EMAIL_NETWORK_UNAVAILABLE', response.status, provider);
+    if (!response.ok) throw providerFailure(response.status, null, provider);
+    throw deliveryFailure('EMAIL_PROVIDER_RESPONSE_INVALID', response.status, provider);
+  }
+  // Brevo reserves an idempotency key for longer than a code's 10-minute life.
+  // Only its explicit idempotency acknowledgement confirms a lost first reply.
+  if (provider === 'brevo' && response.status === 400 && value?.code === 'duplicate_parameter' && typeof value.message === 'string' && /idempotenc/i.test(value.message) && /already|duplicate|processed|used/i.test(value.message)) return { deduplicated: true };
+  if (!response.ok) throw providerFailure(response.status, value, provider);
+  const id = value?.[provider === 'brevo' ? 'messageId' : 'id'];
+  if (typeof id !== 'string' || !id.trim()) throw deliveryFailure('EMAIL_PROVIDER_RESPONSE_INVALID', response.status, provider);
+  return value;
+}
+
 export function createResendMailer({ apiKey = process.env.FENGWEI_RESEND_API_KEY, from = process.env.FENGWEI_EMAIL_FROM, fetch: send = globalThis.fetch } = {}) {
-  const configured = typeof apiKey === 'string' && !!apiKey.trim() && typeof from === 'string' && !!from.trim() && !/[\r\n]/.test(from);
+  apiKey = typeof apiKey === 'string' ? apiKey.trim() : '';
+  from = typeof from === 'string' ? from.trim() : '';
+  const configured = !!apiKey && !!from;
   return {
-    configured,
+    configured, provider: 'resend',
     async sendCode({ email, code, purpose, id }) {
       if (!configured) throw problem(503, 'EMAIL_NOT_CONFIGURED', '邮箱验证服务尚未配置，请联系管理员；已有账号仍可登录。');
-      const operation = { register: '注册账号', recover: '找回密码', bind: '绑定邮箱' }[purpose];
-      let response;
-      try {
-        response = await send('https://api.resend.com/emails', {
-          method: 'POST', headers: { Authorization: `Bearer ${apiKey}`, 'Content-Type': 'application/json', 'Idempotency-Key': `fengwei-email-${id}` },
-          body: JSON.stringify({ from, to: [email], subject: `峰味${operation}验证码`, text: `你正在峰味${operation}。\n\n验证码：${code}\n\n验证码 10 分钟内有效，请勿转发给他人。如非本人操作，请忽略这封邮件。` }),
-          signal: AbortSignal.timeout(10000),
-        });
-        if (!response.ok || typeof (await response.json()).id !== 'string') throw new Error('Mail not accepted');
-      } catch { throw problem(503, 'EMAIL_SEND_UNAVAILABLE', '验证码邮件暂时发送失败，请稍后重试或联系管理员。'); }
+      if (/[\s"']/.test(apiKey)) throw deliveryFailure('EMAIL_KEY_INVALID');
+      emailSender(from, 'resend');
+      await sendMailRequest(send, 'https://api.resend.com/emails', { Authorization: `Bearer ${apiKey}`, 'Idempotency-Key': `fengwei-email-${id}` }, { from, to: [email], ...codeMessage(purpose, code) }, 'resend');
     },
   };
+}
+
+export function createBrevoMailer({ apiKey = process.env.FENGWEI_BREVO_API_KEY, from = process.env.FENGWEI_EMAIL_FROM, fetch: send = globalThis.fetch } = {}) {
+  apiKey = typeof apiKey === 'string' ? apiKey.trim() : '';
+  from = typeof from === 'string' ? from.trim() : '';
+  return {
+    configured: !!apiKey && !!from, provider: 'brevo',
+    async sendCode({ email, code, purpose, id }) {
+      if (!apiKey || !from) throw problem(503, 'EMAIL_NOT_CONFIGURED', '邮箱验证服务尚未配置，请联系管理员；已有账号仍可登录。');
+      if (/[\s"']/.test(apiKey)) throw deliveryFailure('EMAIL_KEY_INVALID', 0, 'brevo');
+      const sender = emailSender(from, 'brevo'), { subject, text } = codeMessage(purpose, code);
+      const htmlContent = `<div style="white-space:pre-line;font-family:sans-serif;line-height:1.8">${text.replaceAll('&', '&amp;').replaceAll('<', '&lt;').replaceAll('>', '&gt;')}</div>`;
+      await sendMailRequest(send, 'https://api.brevo.com/v3/smtp/email', { 'api-key': apiKey }, { sender, to: [{ email }], subject, textContent: text, htmlContent, headers: { idempotencyKey: id } }, 'brevo');
+    },
+  };
+}
+
+export function createEmailMailer({ provider = process.env.FENGWEI_EMAIL_PROVIDER, resendApiKey = process.env.FENGWEI_RESEND_API_KEY, brevoApiKey = process.env.FENGWEI_BREVO_API_KEY, from = process.env.FENGWEI_EMAIL_FROM, fetch: send = globalThis.fetch } = {}) {
+  const selected = typeof provider === 'string' && provider.trim() ? provider.trim().toLowerCase() : brevoApiKey?.trim() ? 'brevo' : 'resend';
+  if (selected === 'resend') return createResendMailer({ apiKey: resendApiKey, from, fetch: send });
+  if (selected === 'brevo') return createBrevoMailer({ apiKey: brevoApiKey, from, fetch: send });
+  const configurationError = problem(503, 'EMAIL_PROVIDER_INVALID', '邮件服务类型不正确，请将 FENGWEI_EMAIL_PROVIDER 设置为 brevo 或 resend 后重新部署。');
+  return { configured: false, configurationError, async sendCode() { throw configurationError; } };
 }
 
 export class EmailAuth {
@@ -55,7 +152,7 @@ export class EmailAuth {
     return matches.length === 1 ? matches[0] : null;
   }
   async request(data, address, session) {
-    if (!this.mailer?.configured) throw problem(503, 'EMAIL_NOT_CONFIGURED', '邮箱验证服务尚未配置，请联系管理员；已有账号仍可登录。');
+    if (!this.mailer?.configured) throw this.mailer?.configurationError || problem(503, 'EMAIL_NOT_CONFIGURED', '邮箱验证服务尚未配置，请联系管理员；已有账号仍可登录。');
     if (!uuid(data?.requestId) || !['register', 'recover', 'bind'].includes(data?.purpose)) throw problem(400, 'INVALID_EMAIL_REQUEST', '邮箱验证请求不完整，请重新打开页面。');
     const email = normalizeEmail(data.email), { purpose } = data;
     if (purpose === 'bind' && (!session || data.expectedUserId !== session.user.id)) throw problem(401, 'LOGIN_REQUIRED', '请重新登录后绑定邮箱。');

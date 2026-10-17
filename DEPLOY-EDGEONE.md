@@ -100,7 +100,9 @@ API 返回 `Server-Timing: app;dur=...`，数值表示应用内处理的毫秒�
 
 ## 邮箱验证码配置（3.2）
 
-在 Resend 验证自己的发信域名，并在 EdgeOne 生产环境设置 `FENGWEI_RESEND_API_KEY`（服务端发信密钥）与 `FENGWEI_EMAIL_FROM`（例如 `峰味 <noreply@mail.example.com>`），保存后重新部署。无需修改既有 Supabase 表或启用 Supabase Auth。未配置邮件服务时已有账号仍可登录，新注册需等待配置完成。详细步骤见 [EMAIL-SETUP.md](EMAIL-SETUP.md)。
+不购买独立域名时，可在 Brevo 验证已有发信邮箱，在 EdgeOne 生产环境设置 `FENGWEI_EMAIL_PROVIDER=brevo`、`FENGWEI_BREVO_API_KEY`（API v3 密钥）和 `FENGWEI_EMAIL_FROM`（例如 `峰味 <已验证的个人邮箱>`），保存后重新部署。免费邮箱由 Brevo 按其政策代发，需确认账号启用和真实试发，详见 [BREVO-SETUP.md](BREVO-SETUP.md)。
+
+已有独立域名也可使用 Resend：设置 `FENGWEI_EMAIL_PROVIDER=resend`、`FENGWEI_RESEND_API_KEY` 和属于已验证域名的 `FENGWEI_EMAIL_FROM`，步骤见 [EMAIL-SETUP.md](EMAIL-SETUP.md)。无需修改既有 Supabase 表或启用 Supabase Auth。未配置邮件服务时已有账号仍可登录，新注册需等待配置完成。
 
 升级后先用原密码登录管理员账号，在“我的 → 我的账号 → 绑定找回邮箱”完成验证。旧普通账号也需主动绑定；新注册账号自动绑定已验证邮箱。找回页填写账号和绑定邮箱，验证码通过后设置新密码，随后重新登录。未绑定邮箱仍可联系管理员线下找回。
 

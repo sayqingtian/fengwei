@@ -13,7 +13,7 @@ import { PasswordRecovery, RECOVERY_MESSAGE } from './password-recovery.mjs';
 import { requestStore } from './request-store.mjs';
 import { CookingCheckins } from './checkins.mjs';
 import { RateLimits } from './rate-limit.mjs';
-import { EmailAuth, createResendMailer } from './email-auth.mjs';
+import { EmailAuth, createEmailMailer } from './email-auth.mjs';
 
 const publicEvent = (event, favorite) => event && ({ id: event.id, revision: event.revision, deleted: event.deleted, photoHash: event.photoHash, recipe: event.recipe ? { ...event.recipe, favorite: !!favorite } : null, savedAt: event.savedAt, conflictCount: event.conflictCount || 1 });
 class HttpError extends Error { constructor(status, code, message) { super(message); Object.assign(this, { status, code }); } }
@@ -47,7 +47,7 @@ export function createApi({ database, password, mailer }) {
   const audit = new AuditLog(database.store), permissions = auth.permissions;
   const checkins = new CookingCheckins(database.store);
   const recovery = new PasswordRecovery(auth.accounts, permissions.adminId);
-  const emailAuth = new EmailAuth(auth.accounts, limits, mailer || createResendMailer());
+  const emailAuth = new EmailAuth(auth.accounts, limits, mailer || createEmailMailer());
   // The pre-existing synthetic-password injection keeps isolated legacy test
   // fixtures usable. Production entry points never inject a test password.
   const emailRequired = password === undefined || mailer !== undefined;

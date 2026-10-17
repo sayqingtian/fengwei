@@ -196,3 +196,66 @@ test('Resend integration sends plain text with idempotency, suppresses provider 
   assert.equal(normalizeEmail(' Cook@Example.TEST '), 'cook@example.test');
   for (const value of ['', 'a@b', '.a@example.test', 'a..b@example.test', 'a@example.test\nBcc:evil@example.test', 'a@example.test,b@example.test']) assert.throws(() => normalizeEmail(value));
 });
+
+test('Resend failures return actionable static reasons while logs and responses exclude provider secrets', async t => {
+  const log = t.mock.method(console, 'error', () => {});
+  const secret = 're_private_provider_fixture', address = 'private-owner@example.test';
+  const cases = [
+    [401, 'validation_error', 'API key is invalid', 'EMAIL_KEY_INVALID'],
+    [403, 'restricted_api_key', 'API key is not active', 'EMAIL_KEY_INVALID'],
+    [403, 'suspended_api_key', 'This API key is suspended', 'EMAIL_KEY_INVALID'],
+    [403, 'invalid_permission', 'Access token is missing required scopes.', 'EMAIL_KEY_PERMISSION'],
+    [403, 'validation_error', `You can only send testing emails to your own email address (${address}). To send emails to other recipients, please verify a domain.`, 'EMAIL_TEST_RECIPIENT_RESTRICTED'],
+    [403, 'validation_error', 'The example.test domain is not verified. Please, add and verify your domain.', 'EMAIL_DOMAIN_UNVERIFIED'],
+    [403, 'validation_error', "We don't allow free public domains. Please use a domain you own instead.", 'EMAIL_DOMAIN_UNSUPPORTED'],
+    [422, 'validation_error', 'Invalid `from` field. The email address needs to follow a valid format.', 'EMAIL_FROM_INVALID'],
+    [429, 'daily_quota_exceeded', 'You have exceeded your daily email sending quota.', 'EMAIL_PROVIDER_DAILY_LIMIT'],
+    [429, 'monthly_quota_exceeded', 'You have exceeded your monthly email sending quota.', 'EMAIL_PROVIDER_MONTHLY_LIMIT'],
+    [429, 'rate_limit_exceeded', 'Too many requests.', 'EMAIL_SEND_BUSY'],
+    [409, 'concurrent_idempotent_requests', 'Another request is in progress.', 'EMAIL_SEND_BUSY'],
+    [409, 'invalid_idempotent_request', 'The request body was modified.', 'EMAIL_RETRY_CONFLICT'],
+    [503, 'service_unavailable', 'API is temporarily unavailable', 'EMAIL_PROVIDER_UNAVAILABLE'],
+    [403, 'unknown_provider_error', 'private provider details', 'EMAIL_SEND_UNAVAILABLE'],
+  ];
+  const value = { email: address, code: '937182', purpose: 'register', id: randomUUID() };
+  for (const [status, name, message, code] of cases) {
+    const mailer = createResendMailer({ apiKey: secret, from: '峰味 <noreply@example.test>', fetch: async () => Response.json({ name, message: `${message} ${secret}` }, { status }) });
+    await assert.rejects(() => mailer.sendCode(value), error => error.status === 503 && error.code === code && !error.message.includes(secret) && !error.message.includes(address) && !error.message.includes('937182'));
+  }
+  assert.equal(log.mock.callCount(), cases.length);
+  const logs = JSON.stringify(log.mock.calls.map(call => call.arguments));
+  for (const privateValue of [secret, address, '937182', 'private provider details']) assert.ok(!logs.includes(privateValue));
+  assert.match(logs, /providerStatus/); assert.match(logs, /EMAIL_DOMAIN_UNVERIFIED/);
+});
+
+test('Resend trims pasted settings, validates senders, and distinguishes connection and response failures', async t => {
+  const log = t.mock.method(console, 'error', () => {}), requests = [];
+  const args = { email: 'receiver@example.test', code: '123456', purpose: 'bind', id: randomUUID() };
+  const configured = createResendMailer({ apiKey: '  re_synthetic_test_only\n', from: '  峰味 <noreply@example.test>  ', fetch: async (url, options) => { requests.push(options); return Response.json({ id: 'fixture' }); } });
+  await configured.sendCode(args);
+  assert.equal(requests[0].headers.Authorization, 'Bearer re_synthetic_test_only');
+  assert.equal(JSON.parse(requests[0].body).from, '峰味 <noreply@example.test>');
+  for (const from of ['"峰味 <noreply@example.test>"', 'https://www.example.test', 'noreply@example.test\r\nBcc:evil@example.test']) {
+    await assert.rejects(() => createResendMailer({ apiKey: 're_test_fixture', from, fetch: async () => { assert.fail('Invalid settings must not call Resend'); } }).sendCode(args), { code: 'EMAIL_FROM_INVALID' });
+  }
+  await assert.rejects(() => createResendMailer({ apiKey: '"re_quoted_key"', from: 'noreply@example.test', fetch: async () => { assert.fail('Invalid settings must not call Resend'); } }).sendCode(args), { code: 'EMAIL_KEY_INVALID' });
+  const failures = [
+    [async () => { throw new Error('private transport diagnostics'); }, 'EMAIL_NETWORK_UNAVAILABLE'],
+    [async () => new Response('<private proxy response>'), 'EMAIL_PROVIDER_RESPONSE_INVALID'],
+    [async () => Response.json({ id: '' }), 'EMAIL_PROVIDER_RESPONSE_INVALID'],
+    [async () => new Response('private upstream response', { status: 401 }), 'EMAIL_KEY_INVALID'],
+    [async () => new Response('private upstream response', { status: 502 }), 'EMAIL_PROVIDER_UNAVAILABLE'],
+    [async () => ({ status: 200, ok: true, async json() { throw Object.assign(new Error('private body timeout'), { name: 'AbortError' }); } }), 'EMAIL_NETWORK_UNAVAILABLE'],
+  ];
+  for (const [send, code] of failures) await assert.rejects(() => createResendMailer({ apiKey: 're_test_fixture', from: 'noreply@example.test', fetch: send }).sendCode(args), { code });
+  assert.ok(!JSON.stringify(log.mock.calls.map(call => call.arguments)).includes('private'));
+});
+
+test('email send API preserves the safe provider diagnosis and never activates a rejected code', async t => {
+  const f = await fixture(t); t.mock.method(console, 'error', () => {});
+  Object.assign(f.mailer, createResendMailer({ apiKey: 're_test_fixture', from: 'noreply@example.test', fetch: async () => Response.json({ name: 'validation_error', message: 'The example.test domain is not verified.' }, { status: 403 }) }));
+  const requestId = randomUUID(), response = await f.call('email/code', { requestId, purpose: 'register', email: 'receiver@example.test' });
+  assert.equal(response.status, 503); const body = await response.json();
+  assert.equal(body.code, 'EMAIL_DOMAIN_UNVERIFIED'); assert.match(body.error, /发信域名尚未通过验证/);
+  assert.equal(await f.store.get(`private/email-code-sent/${requestId}.json`, { type: 'json' }), null);
+});
