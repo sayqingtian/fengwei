@@ -89,4 +89,15 @@ button, a, select, input, textarea, label[for] { touch-action: manipulation; }
 .checkin-invite{padding:18px;background:var(--sage);border-radius:12px}.checkin-invite h3{font-size:20px!important;margin-bottom:8px!important}.checkin-invite p{font-size:12px;color:var(--muted);line-height:1.8}.checkin-invite .button{margin-top:8px}.checkin-celebrate{text-align:center;padding:12px 0 25px}.checkin-celebrate>.icon{width:48px;height:48px;padding:10px;background:var(--sage);border-radius:50%;color:var(--green)}.checkin-celebrate h3{font:24px var(--serif);margin:15px 0 10px}.checkin-celebrate p{font-size:13px;color:var(--muted)}.checkin-stats{display:flex;gap:28px;margin:24px 0;color:var(--muted);font-size:13px}.checkin-stats strong{font:32px var(--serif);color:var(--green);margin-right:4px}.checkin-entry+.checkin-entry{border-top:1px solid var(--line);padding-top:20px;margin-top:20px}.checkin-entry h2{font-size:19px;margin:0;overflow-wrap:anywhere}.checkin-note{white-space:pre-wrap;overflow-wrap:anywhere;font-size:14px;line-height:1.8}.checkin-entry .text-button{padding-left:0}
 @media(prefers-reduced-motion:reduce){.loading-dots i,.loading-ring{animation:none}}
 .email-code-row{display:flex;align-items:flex-end;gap:10px}.email-code-row .field{min-width:0;flex:1;margin:0}.email-code-row>.button{width:auto;flex-shrink:0;min-height:46px;margin-bottom:0;padding-inline:12px;font-size:13px}.email-code-status{min-height:1.5em;line-height:1.7;overflow-wrap:anywhere}.account-email{overflow-wrap:anywhere}.account-email-panel{margin-top:20px}.account-email-panel h2{font-family:var(--serif);font-weight:500}
+/* Keep dialogs bounded and photos visible without inset, dvh or aspect-ratio. */
+.modal-overlay,.auth-overlay{top:0;right:0;bottom:0;left:0}
+.modal{min-height:0;max-height:100%}
+.modal-scroll{min-width:0;min-height:0;flex:1 1 auto}
+.confirm-modal{max-height:100%}
+.card-photo::before{content:"";display:block;padding-top:67.567568%}
+.card-photo>img,.card-photo>.card-placeholder{position:absolute;top:0;right:0;bottom:0;left:0;width:100%;height:100%}
+@media(max-width:520px){
+  .modal{height:100%;max-height:100%}
+  .card-photo::before{padding-top:86.956522%}
+}
 :root{--fengwei-styles-ready:yes}
